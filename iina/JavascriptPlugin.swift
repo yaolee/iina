@@ -39,6 +39,10 @@ class JavascriptPlugin: NSObject {
     case cannotLoadPlugin
   }
 
+  static var hasYTDL: Bool {
+    return plugins.contains { $0.enabled && $0.identifier == "io.iina.ytdl" }
+  }
+
   static var plugins = loadPlugins() {
     didSet {
       NotificationCenter.default.post(Notification(name: .iinaPluginChanged))
@@ -68,6 +72,7 @@ class JavascriptPlugin: NSObject {
   var identifier: String
   let version: String
   let desc: String?
+  /// The plugin is a symlink of an external folder, mainly by the CLI
   var isExternal: Bool = false
 
   var root: URL
@@ -90,14 +95,20 @@ class JavascriptPlugin: NSObject {
   var preferencesPageURL: URL?
   var helpPageURL: URL?
   var githubURLString: String? {
-    guard let githubRepo = githubRepo else { return nil }
+    guard let githubRepo else { return nil }
     return "https://github.com/\(githubRepo)"
   }
+
+  var supportAutoUpdate: Bool { githubRepo == nil || githubVersion == nil }
 
   lazy var preferences: [String: Any] = {
     NSDictionary(contentsOfFile: preferencesFileURL.path) as? [String: Any] ?? [:]
   }()
-  let defaultPrefernces: [String: Any]
+  let defaultPreferences: [String: Any]
+
+  static func recreateAllPlugins() {
+    plugins = loadPlugins()
+  }
 
   static private func loadPlugins() -> [JavascriptPlugin] {
     guard IINA_ENABLE_PLUGIN_SYSTEM else { return [] }
@@ -199,7 +210,7 @@ class JavascriptPlugin: NSObject {
       "unzip '\(tempZipFile)' -d '\(tempDecompressDir)'",
       "mv '\(tempDecompressDir)'/* '\(tempFolder)'/"
     ].joined(separator: " && ")
-    let (process, stdout, stderr) = Process.run(["/bin/bash", "-c", cmd], at: pluginsRoot)
+    let (process, stdout, stderr) = Process.run(["/bin/sh", "-c", cmd], at: pluginsRoot)
 
     guard process.terminationStatus == 0 else {
       let outText = String(data: stdout.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? "None"
@@ -250,6 +261,30 @@ class JavascriptPlugin: NSObject {
         try? FileManager.default.removeItem(at: pluginsRoot.appendingPathComponent(item))
       }
     }
+    
+    // If there is a iinaplgz file inside the latest release, use the plgz file
+    
+    let response = Just.get("https://api.github.com/repos\(url.path)/releases/latest")
+
+    if response.ok,
+       let json = response.json as? [String: Any],
+       let assets = json["assets"] as? [[String: Any]],
+       let plgzItem = assets.first(where: { ($0["name"] as? String)?.hasSuffix(".iinaplgz") ?? false }),
+       let dlURL = plgzItem["browser_download_url"] as? String
+    {
+      do {
+        let plgzName = plgzItem["name"] as! String
+        let destURL = Utility.tempDirURL.appendingPathComponent(plgzName)
+        let downloadResponse = Just.get(dlURL)
+        try downloadResponse.content?.write(to: destURL)
+        return try create(fromPackageURL: destURL)
+      } catch {
+        Logger.log("Cannot find an iinaplgz file in the latest release", level: .debug)
+      }
+    }
+    
+    // Otherwise, install from source
+    Logger.log("Installing from source", level: .debug)
 
     func removeTempPluginFolder() {
       try? FileManager.default.removeItem(at: pluginsRoot.appendingPathComponent(tempFolder))
@@ -261,7 +296,7 @@ class JavascriptPlugin: NSObject {
       "unzip '\(tempZipFile)' -d '\(tempDecompressDir)'",
       "mv '\(tempDecompressDir)'/*/* '\(tempFolder)'/"
     ].joined(separator: " && ")
-    let (process, stdout, stderr) = Process.run(["/bin/bash", "-c", cmd], at: pluginsRoot)
+    let (process, stdout, stderr) = Process.run(["/bin/sh", "-c", cmd], at: pluginsRoot)
 
     guard process.terminationStatus == 0 else {
       let outText = String(data: stdout.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? "None"
@@ -275,10 +310,8 @@ class JavascriptPlugin: NSObject {
       throw PluginError.cannotLoadPlugin
     }
 
-    guard plugin.githubVersion != nil, url.absoluteString == plugin.githubURLString else {
-      Logger.log("The plugin \(plugin.name) doesn't contain a ghVersion field or its ghRepo doesn't match the current requested URL \(url.absoluteString).")
-      removeTempPluginFolder()
-      throw PluginError.cannotLoadPlugin
+    if plugin.githubVersion == nil || plugin.githubURLString == nil {
+      Logger.log("The plugin \(plugin.name) doesn't contain a ghVersion field or its ghRepo doesn't match the current requested URL \(url.absoluteString).", level: .warning)
     }
     return plugin
   }
@@ -321,7 +354,28 @@ class JavascriptPlugin: NSObject {
     }
 
     self.root = url
-    self.name = name
+
+    // e.g. "localized": { "fr": { "name": ..., "description": ..., "sidebarTab": { "name": ... } } }
+    let l10nDict = jsonDict["localized"] as? [String: [String: Any]] ?? [:]
+    // Also search for "en" (we assume Info.json is in English; won't cause big problem if it's not).
+    let preferredLang = Bundle.preferredLocalizations(from: ["en"] + Array(l10nDict.keys)).first
+    let preferredL10n: [String: Any]? = preferredLang.flatMap { l10nDict[$0] }
+
+    func l10n(_ key: String, fallback: String?) -> String? {
+      if let preferredL10n, let value = preferredL10n[key] as? String {
+        return value
+      }
+      return fallback
+    }
+
+    func l10nNested(_ key: String, _ subKey: String, fallback: String?) -> String? {
+      if let preferredL10n, let value = (preferredL10n[key] as? [String: Any])?[subKey] as? String {
+        return value
+      }
+      return fallback
+    }
+
+    self.name = l10n("name", fallback: name) ?? name
     self.version = version
     self.entryPath = entry
     self.globalEntryPath = jsonDict["globalEntry"] as? String
@@ -329,18 +383,18 @@ class JavascriptPlugin: NSObject {
     self.authorURL = author["url"]
     self.authorEmail = author["email"]
     self.identifier = identifier
-    self.desc = jsonDict["description"] as? String
+    self.desc = l10n("description", fallback: jsonDict["description"] as? String)
     self.preferencesPage = jsonDict["preferencesPage"] as? String
     self.helpPage = jsonDict["helpPage"] as? String
     self.domainList = (jsonDict["allowedDomains"] as? [String]) ?? []
     self.subProviders = jsonDict["subtitleProviders"] as? [[String: String]]
-    
+
     if externalURL != nil {
       self.isExternal = true
     }
 
     if let sidebarTabDef = jsonDict["sidebarTab"] as? [String: String] {
-      self.sidebarTabName = sidebarTabDef["name"]
+      self.sidebarTabName = l10nNested("sidebarTab", "name", fallback: sidebarTabDef["name"])
     } else {
       self.sidebarTabName = nil
     }
@@ -377,7 +431,7 @@ class JavascriptPlugin: NSObject {
     }
     self.entryURL = entryURL
     
-    if let globalEntryPath = globalEntryPath {
+    if let globalEntryPath {
       guard let globalEntryURL = resolvePath(globalEntryPath, root: root) else {
         Logger.log("The entry file \(globalEntryPath) doesn't exist", level: .error)
         return nil
@@ -388,11 +442,11 @@ class JavascriptPlugin: NSObject {
     self.preferencesPageURL = resolvePath(preferencesPage, root: root)
     self.helpPageURL = resolvePath(helpPage, root: root, allowNetwork: true)
 
-    if let defaultPrefernces = jsonDict["preferenceDefaults"] as? [String: Any] {
-      self.defaultPrefernces = defaultPrefernces
+    if let defaultPreferences = jsonDict["preferenceDefaults"] as? [String: Any] {
+      self.defaultPreferences = defaultPreferences
     } else {
       Logger.log("Unable to read preferenceDefaults", level: .warning)
-      self.defaultPrefernces = [:]
+      self.defaultPreferences = [:]
     }
 
     super.init()
@@ -400,10 +454,11 @@ class JavascriptPlugin: NSObject {
     if (enabled) {
       registerSubProviders()
     }
+    Logger.log("Loaded JS plugin: \(name) \(version)\(enabled ? "" : " (disabled)")")
   }
 
   func registerSubProviders() {
-    guard let subProviders = subProviders else { return }
+    guard let subProviders else { return }
     for provider in subProviders {
       guard let spID = provider["id"], let spName = provider["name"] else {
         Logger.log("A subtitle provider declaration should have an id and a name.", level: .error)
@@ -433,7 +488,9 @@ class JavascriptPlugin: NSObject {
       try fileManager.moveItem(at: self.root, to: dest)
       self.root = dest
       self.entryURL = resolvePath(entryPath, root: root)!
-      self.globalEntryURL = resolvePath(globalEntryPath, root: root)!
+      if let globalEntryPath {
+        self.globalEntryURL = resolvePath(globalEntryPath, root: root)!
+      }
       self.preferencesPageURL = resolvePath(preferencesPage, root: root)
       self.helpPageURL = resolvePath(helpPage, root: root, allowNetwork: true)
     } catch let error {
@@ -444,27 +501,33 @@ class JavascriptPlugin: NSObject {
   @discardableResult
   func remove() -> Int? {
     let pos = JavascriptPlugin.plugins.firstIndex(of: self)
-    if let pos = pos {
+    if let pos {
       JavascriptPlugin.plugins.remove(at: pos)
     }
     try? FileManager.default.removeItem(at: root)
     return pos
   }
 
-  func checkForUpdates(_ handler: @escaping (String?) -> Void) {
-    if let ghVersion = githubVersion, let ghRepo = githubRepo {
-      Just.get("https://raw.githubusercontent.com/\(ghRepo)/master/Info.json", asyncCompletionHandler:  { result in
-        if let json = result.json as? [String: Any],
+  func checkNewVersion() async throws -> String? {
+    try await withCheckedThrowingContinuation { continuation in
+      guard let ghVersion = githubVersion, let ghRepo = githubRepo else {
+        continuation.resume(returning: nil)
+        return
+      }
+      Just.get("https://raw.githubusercontent.com/\(ghRepo)/main/Info.json", asyncCompletionHandler:  { result in
+        if result.ok,
+           let json = result.json as? [String: Any],
            let newGHVersion = json["ghVersion"] as? Int,
-           let newVersion = json["version"] as? String,
-           newGHVersion > ghVersion {
-          handler(newVersion)
+           let newVersion = json["version"] as? String {
+          if newGHVersion > ghVersion {
+            continuation.resume(returning: newVersion)
+          } else {
+            continuation.resume(returning: nil)
+          }
         } else {
-          handler(nil)
+          continuation.resume(throwing: PluginError.cannotDownload(result.description, result.text ?? ""))
         }
       })
-    } else {
-      handler(nil)
     }
   }
 
@@ -483,14 +546,10 @@ class JavascriptPlugin: NSObject {
   func syncPreferences() {
     let url = preferencesFileURL
     Utility.createFileIfNotExist(url: url)
-    if #available(macOS 10.13, *) {
-      do {
-        try (preferences as NSDictionary).write(to: url)
-      } catch let e {
-        Logger.log("Unable to write preferences file: \(e.localizedDescription)", level: .error)
-      }
-    } else {
-      (preferences as NSDictionary).write(to: url, atomically: true)
+    do {
+      try (preferences as NSDictionary).write(to: url)
+    } catch let e {
+      Logger.log("Unable to write preferences file: \(e.localizedDescription)", level: .error)
     }
   }
 
@@ -513,11 +572,38 @@ class JavascriptPlugin: NSObject {
     Utility.createDirIfNotExist(url: url)
     return url
   }()
+
+  func localizedPermissions(_ permissions: Set<Permission>? = nil, newLine: String = "\n") -> [(name: String, desc: String, isDangerous: Bool)] {
+    let permissions = permissions ?? self.permissions
+
+    let sorted = permissions.sorted { (a, b) in
+      let da = a.isDangerous, db = b.isDangerous
+      if da == db { return a.rawValue < b.rawValue }
+      return da
+    }
+
+    return sorted.map { permission in
+      func localize(_ key: String) -> String {
+        return NSLocalizedString("permissions.\(permission.rawValue).\(key)", comment: "")
+      }
+      var desc = localize("desc")
+      if case .networkRequest = permission {
+        if domainList.contains("*") {
+          desc += "\(newLine)- \(localize("any_site"))"
+        } else {
+          desc += "\(newLine)- "
+          desc += domainList.joined(separator: "\(newLine)- ")
+        }
+      }
+
+      return (name: localize("name"), desc: desc, isDangerous: permission.isDangerous)
+    }
+  }
 }
 
 
 fileprivate func resolvePath(_ path: String?, root: URL, allowNetwork: Bool = false) -> URL? {
-  guard let path = path else { return nil }
+  guard let path else { return nil }
   if path.hasPrefix("http://") || path.hasPrefix("https://") {
     if allowNetwork { return URL(string: path) }
     else { return nil }

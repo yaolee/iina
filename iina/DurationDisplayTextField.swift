@@ -16,11 +16,23 @@ class DurationDisplayTextField: NSTextField {
   }
 
   static var precision : UInt = UInt(Preference.integer(for: .timeDisplayPrecision))
-  var mode: DisplayMode = .duration
+  var mode: DisplayMode = .duration { didSet { updateText() } }
+  var duration: VideoTime = .zero
+  var current: VideoTime = .zero
+  var remaining: VideoTime = .zero
 
+  override init(frame frameRect: NSRect) {
+    super.init(frame: .zero)
+    let fontSize = NSFont.systemFontSize(for: .mini)
+    self.font = NSFont.monospacedDigitSystemFont(ofSize: fontSize, weight: .regular)
+  }
+  
+  required init?(coder: NSCoder) {
+    fatalError("init(coder:) has not been implemented")
+  }
+  
   /** Switches the display mode between duration and remaining time */
-  func switchMode() {
-    guard mode != .current else { return }
+  private func switchMode() {
     switch mode {
     case .duration:
       mode = .remaining
@@ -29,7 +41,15 @@ class DurationDisplayTextField: NSTextField {
     }
   }
 
-  func updateText(with duration: VideoTime, given current: VideoTime) {
+  func updateText(with duration: VideoTime, given current: VideoTime,
+                  and remaining: VideoTime) {
+    self.duration = duration
+    self.current = current
+    self.remaining = remaining
+    updateText()
+  }
+  
+  private func updateText() {
     let precision = DurationDisplayTextField.precision
     let stringValue: String
     switch mode {
@@ -38,10 +58,6 @@ class DurationDisplayTextField: NSTextField {
     case .duration:
       stringValue = duration.stringRepresentationWithPrecision(precision)
     case .remaining:
-      var remaining = (duration - current)
-      if remaining.second < 0 {
-        remaining = VideoTime.zero
-      }
       stringValue = "-\(remaining.stringRepresentationWithPrecision(precision))"
     }
     self.stringValue = stringValue
@@ -50,6 +66,7 @@ class DurationDisplayTextField: NSTextField {
   override func mouseDown(with event: NSEvent) {
     super.mouseDown(with: event)
 
+    guard mode != .current else { return }
     self.switchMode()
     Preference.set(mode == .remaining, for: .showRemainingTime)
   }
@@ -75,6 +92,7 @@ class DurationDisplayTextField: NSTextField {
     // handles the remaining time text field in the touch bar
     super.touchesBegan(with: event)
 
+    guard mode != .current else { return }
     self.switchMode()
     Preference.set(mode == .remaining, for: .touchbarShowRemainingTime)
   }
@@ -84,9 +102,7 @@ class DurationDisplayTextField: NSTextField {
     DurationDisplayTextField.precision = precision
     Preference.set(Int(precision), for: .timeDisplayPrecision)
     PlayerCore.playerCores.forEach { core in
-      if core.syncPlayTimeTimer != nil {
-        core.createSyncUITimer()
-      }
+      core.refreshSyncUITimer()
     }
   }
 }

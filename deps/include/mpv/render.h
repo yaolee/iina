@@ -49,6 +49,7 @@ extern "C" {
  * Supported backends
  * ------------------
  *
+ * Direct3D 11: via MPV_RENDER_API_TYPE_D3D11, see render_d3d11.h header.
  * OpenGL: via MPV_RENDER_API_TYPE_OPENGL, see render_gl.h header.
  * Software: via MPV_RENDER_API_TYPE_SW, see section "Software renderer"
  *
@@ -103,7 +104,7 @@ extern "C" {
  *      In addition, you were required to call all mpv_render*() API functions
  *      from the same thread on which mpv_render_context_create() was originally
  *      run (for the same the mpv_render_context). Not honoring it led to UB
- *      (deadlocks, use of invalid pthread_t handles), even if you moved your GL
+ *      (deadlocks, use of invalid mp_thread handles), even if you moved your GL
  *      context to a different thread correctly.
  *      These problems were addressed in API version 1.105 (mpv 0.30.0).
  *
@@ -213,8 +214,9 @@ typedef enum mpv_render_param_type {
      * Control surface depth. Valid for mpv_render_context_render().
      * Type: int*
      * This implies the depth of the surface passed to the render function in
-     * bits per channel. If omitted or set to 0, the renderer will assume 8.
-     * Typically used to control dithering.
+     * bits per channel. If omitted or set to 0, the renderer will use the
+     * depth of the texture format with the Direct3D 11 backend, and assume 8
+     * otherwise. Typically used to control dithering.
      */
     MPV_RENDER_PARAM_DEPTH = 5,
     /**
@@ -225,6 +227,7 @@ typedef enum mpv_render_param_type {
      */
     MPV_RENDER_PARAM_ICC_PROFILE = 6,
     /**
+     * Deprecated
      * Ambient light in lux. Valid for mpv_render_context_set_parameter().
      * Type: int*
      * This can be used for automatic gamma correction.
@@ -421,6 +424,17 @@ typedef enum mpv_render_param_type {
      * See MPV_RENDER_PARAM_SW_STRIDE for alignment requirements.
      */
     MPV_RENDER_PARAM_SW_POINTER = 20,
+    /**
+     * Required parameters for initializing the Direct3D 11 renderer. Valid
+     * for mpv_render_context_create().
+     * Type: mpv_d3d11_init_params*
+     */
+    MPV_RENDER_PARAM_D3D11_INIT_PARAMS = 21,
+    /**
+     * Describes a D3D11 render target. Valid for mpv_render_context_render().
+     * Type: mpv_d3d11_fbo*
+     */
+    MPV_RENDER_PARAM_D3D11_FBO = 22,
 } mpv_render_param_type;
 
 /**
@@ -463,6 +477,8 @@ typedef struct mpv_render_param {
 /**
  * Predefined values for MPV_RENDER_PARAM_API_TYPE.
  */
+// See render_d3d11.h
+#define MPV_RENDER_API_TYPE_D3D11 "d3d11"
 // See render_gl.h
 #define MPV_RENDER_API_TYPE_OPENGL "opengl"
 // See section "Software renderer"
@@ -574,8 +590,8 @@ typedef struct mpv_render_frame_info {
  *      MPV_ERROR_INVALID_PARAMETER: at least one of the provided parameters was
  *                                   not valid.
  */
-int mpv_render_context_create(mpv_render_context **res, mpv_handle *mpv,
-                              mpv_render_param *params);
+MPV_EXPORT int mpv_render_context_create(mpv_render_context **res, mpv_handle *mpv,
+                                         mpv_render_param *params);
 
 /**
  * Attempt to change a single parameter. Not all backends and parameter types
@@ -587,8 +603,8 @@ int mpv_render_context_create(mpv_render_context **res, mpv_handle *mpv,
  *         success, otherwise an error code depending on the parameter type
  *         and situation.
  */
-int mpv_render_context_set_parameter(mpv_render_context *ctx,
-                                     mpv_render_param param);
+MPV_EXPORT int mpv_render_context_set_parameter(mpv_render_context *ctx,
+                                                mpv_render_param param);
 
 /**
  * Retrieve information from the render context. This is NOT a counterpart to
@@ -609,8 +625,8 @@ int mpv_render_context_set_parameter(mpv_render_context *ctx,
  *         and situation. MPV_ERROR_NOT_IMPLEMENTED is used for unknown
  *         param.type, or if retrieving it is not supported.
  */
-int mpv_render_context_get_info(mpv_render_context *ctx,
-                                mpv_render_param param);
+MPV_EXPORT int mpv_render_context_get_info(mpv_render_context *ctx,
+                                           mpv_render_param param);
 
 typedef void (*mpv_render_update_fn)(void *cb_ctx);
 
@@ -630,9 +646,9 @@ typedef void (*mpv_render_update_fn)(void *cb_ctx);
  *                 redrawn
  * @param callback_ctx opaque argument to the callback
  */
-void mpv_render_context_set_update_callback(mpv_render_context *ctx,
-                                            mpv_render_update_fn callback,
-                                            void *callback_ctx);
+MPV_EXPORT void mpv_render_context_set_update_callback(mpv_render_context *ctx,
+                                                       mpv_render_update_fn callback,
+                                                       void *callback_ctx);
 
 /**
  * The API user is supposed to call this when the update callback was invoked
@@ -657,7 +673,7 @@ void mpv_render_context_set_update_callback(mpv_render_context *ctx,
  *         to the API user are set, or if the return value is 0, nothing needs
  *         to be done.
  */
-uint64_t mpv_render_context_update(mpv_render_context *ctx);
+MPV_EXPORT uint64_t mpv_render_context_update(mpv_render_context *ctx);
 
 /**
  * Flags returned by mpv_render_context_update(). Each value represents a bit
@@ -705,7 +721,7 @@ typedef enum mpv_render_update_flag {
  *               happens with unknown parameters.
  * @return error code
  */
-int mpv_render_context_render(mpv_render_context *ctx, mpv_render_param *params);
+MPV_EXPORT int mpv_render_context_render(mpv_render_context *ctx, mpv_render_param *params);
 
 /**
  * Tell the renderer that a frame was flipped at the given time. This is
@@ -718,7 +734,7 @@ int mpv_render_context_render(mpv_render_context *ctx, mpv_render_param *params)
  *
  * @param ctx a valid render context
  */
-void mpv_render_context_report_swap(mpv_render_context *ctx);
+MPV_EXPORT void mpv_render_context_report_swap(mpv_render_context *ctx);
 
 /**
  * Destroy the mpv renderer state.
@@ -729,7 +745,28 @@ void mpv_render_context_report_swap(mpv_render_context *ctx);
  * @param ctx a valid render context. After this function returns, this is not
  *            a valid pointer anymore. NULL is also allowed and does nothing.
  */
-void mpv_render_context_free(mpv_render_context *ctx);
+MPV_EXPORT void mpv_render_context_free(mpv_render_context *ctx);
+
+#ifdef MPV_CPLUGIN_DYNAMIC_SYM
+
+MPV_DEFINE_SYM_PTR(mpv_render_context_create)
+#define mpv_render_context_create pfn_mpv_render_context_create
+MPV_DEFINE_SYM_PTR(mpv_render_context_set_parameter)
+#define mpv_render_context_set_parameter pfn_mpv_render_context_set_parameter
+MPV_DEFINE_SYM_PTR(mpv_render_context_get_info)
+#define mpv_render_context_get_info pfn_mpv_render_context_get_info
+MPV_DEFINE_SYM_PTR(mpv_render_context_set_update_callback)
+#define mpv_render_context_set_update_callback pfn_mpv_render_context_set_update_callback
+MPV_DEFINE_SYM_PTR(mpv_render_context_update)
+#define mpv_render_context_update pfn_mpv_render_context_update
+MPV_DEFINE_SYM_PTR(mpv_render_context_render)
+#define mpv_render_context_render pfn_mpv_render_context_render
+MPV_DEFINE_SYM_PTR(mpv_render_context_report_swap)
+#define mpv_render_context_report_swap pfn_mpv_render_context_report_swap
+MPV_DEFINE_SYM_PTR(mpv_render_context_free)
+#define mpv_render_context_free pfn_mpv_render_context_free
+
+#endif
 
 #ifdef __cplusplus
 }

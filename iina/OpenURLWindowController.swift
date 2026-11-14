@@ -8,7 +8,7 @@
 
 import Cocoa
 
-class OpenURLWindowController: NSWindowController, NSTextFieldDelegate, NSControlTextEditingDelegate {
+class OpenURLWindowController: NSWindowController, NSTextFieldDelegate, NSControlTextEditingDelegate, NSWindowDelegate {
 
   override var windowNibName: NSNib.Name {
     return NSNib.Name("OpenURLWindowController")
@@ -23,7 +23,21 @@ class OpenURLWindowController: NSWindowController, NSTextFieldDelegate, NSContro
   @IBOutlet weak var errorMessageLabel: NSTextField!
   @IBOutlet weak var openButton: NSButton!
 
+  @IBOutlet weak var overlayView: NSVisualEffectView!
+  @IBOutlet weak var loadingMediaProgressIndicator: NSProgressIndicator!
+
   var isAlternativeAction = false
+
+  var playerCore: PlayerCore?
+  var loadingURL: String?
+
+  private var invalidURLMessage: String {
+    NSLocalizedString("alert.invalid_url", comment: "The URL is invalid.")
+  }
+
+  private var failedToOpenURLMessage: String {
+    NSLocalizedString("alert.error_open", comment: "Cannot open file or stream!")
+  }
 
   override func windowDidLoad() {
     super.windowDidLoad()
@@ -35,23 +49,72 @@ class OpenURLWindowController: NSWindowController, NSTextFieldDelegate, NSContro
     ([.closeButton, .miniaturizeButton, .zoomButton] as [NSWindow.ButtonType]).forEach {
       window?.standardWindowButton($0)?.isHidden = true
     }
+
+    loadingMediaProgressIndicator.startAnimation(self)
+  }
+
+  func showLoadingScreen(playerCore: PlayerCore) {
+    _ = window
+    overlayView.isHidden = false
+    // Must not leave the focus in the username or password text fields.
+    window?.makeFirstResponder(nil)
+    self.playerCore = playerCore
+    loadingURL = playerCore.info.currentURL?.absoluteString
+    if #available(macOS 14, *) {
+      NSApp.activate()
+    } else {
+      NSApp.activate(ignoringOtherApps: true)
+    }
+    showWindow(self)
+  }
+
+  func failedToLoadURL() {
+    guard isWindowLoaded && window?.isVisible == true else { return }
+    urlField.stringValue = loadingURL ?? ""
+    errorMessageLabel.stringValue = failedToOpenURLMessage
+    errorMessageLabel.isHidden = false
+    overlayView.isHidden = true
+    urlField.textColor = .systemRed
+  }
+
+  func resetWindowState() {
+    urlField.stringValue = ""
+    urlField.textColor = .labelColor
+    usernameField.stringValue = ""
+    passwordField.stringValue = ""
+    errorMessageLabel.stringValue = invalidURLMessage
+    errorMessageLabel.isHidden = true
+    rememberPasswordCheckBox.state = .off
+    urlStackView.setVisibilityPriority(.notVisible, for: httpPrefixTextField)
+    window?.makeFirstResponder(urlField)
+    overlayView.isHidden = true
+    playerCore = nil
+    loadingURL = nil
+  }
+
+  func windowShouldClose(_ sender: NSWindow) -> Bool {
+    guard let playerCore else { return true }
+    playerCore.stop()
+    return true
+  }
+
+  func windowWillClose(_ notification: Notification) {
+    playerCore = nil
+    overlayView.isHidden = true
   }
 
   override func cancelOperation(_ sender: Any?) {
     window?.close()
   }
 
-  func resetFields() {
-    urlField.stringValue = ""
-    usernameField.stringValue = ""
-    passwordField.stringValue = ""
-    rememberPasswordCheckBox.state = .off
-    urlStackView.setVisibilityPriority(.notVisible, for: httpPrefixTextField)
-    window?.makeFirstResponder(urlField)
-  }
-
   @IBAction func cancelBtnAction(_ sender: Any) {
     window?.close()
+  }
+
+  @IBAction func stopLoadingBtnAction(_ sender: Any) {
+    guard let playerCore else { return }
+    playerCore.stop()
+    overlayView.isHidden = true
   }
 
   @IBAction func openBtnAction(_ sender: Any) {
@@ -65,8 +128,11 @@ class OpenURLWindowController: NSWindowController, NSTextFieldDelegate, NSContro
                                   server: host,
                                   port: url.port)
       }
-      window?.close()
-      PlayerCore.activeOrNewForMenuAction(isAlternative: isAlternativeAction).openURL(url)
+      overlayView.isHidden = false
+      // Must not leave the focus in the username or password text fields.
+      window?.makeFirstResponder(nil)
+      playerCore = PlayerCore.activeOrNewForMenuAction(isAlternative: isAlternativeAction)
+      playerCore!.openURL(url)
     } else {
       Utility.showAlert("wrong_url_format")
     }
@@ -77,15 +143,29 @@ class OpenURLWindowController: NSWindowController, NSTextFieldDelegate, NSContro
     let username = usernameField.stringValue
     let password = passwordField.stringValue
     let trimmedUrlString = urlField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-    guard var urlValue = trimmedUrlString.addingPercentEncoding(withAllowedCharacters: .urlAllowed) else {
-      return (nil, false)
+    // For apps built with Xcode 15 or later the behavior of the URL initializer has changed when
+    // running under macOS Sonoma or later. The behavior now matches URLComponents and will
+    // automatically percent encode characters. Must not apply percent encoding to the string
+    // passed to the URL initializer if the new new behavior is active.
+    var performPercentEncoding = true
+#if compiler(>=5.9)
+    if #available(macOS 14, *) {
+      performPercentEncoding = false
+    }
+#endif
+    var pstr = trimmedUrlString
+    if performPercentEncoding {
+      guard let urlValue = trimmedUrlString.addingPercentEncoding(withAllowedCharacters: .urlAllowed) else {
+        return (nil, false)
+      }
+      pstr = urlValue
     }
     var hasScheme = true
-    if let url = URL(string: urlValue), url.scheme == nil {
-      urlValue = "http://" + urlValue
+    if let url = URL(string: pstr), url.scheme == nil {
+      pstr = "http://" + pstr
       hasScheme = false
     }
-    guard let nsurl = NSURL(string: urlValue)?.standardized, let urlComponents = NSURLComponents(url: nsurl, resolvingAgainstBaseURL: false) else { return (nil, false) }
+    guard let nsurl = NSURL(string: pstr)?.standardized, let urlComponents = NSURLComponents(url: nsurl, resolvingAgainstBaseURL: false) else { return (nil, false) }
     if !username.isEmpty {
       urlComponents.user = username
       if !password.isEmpty {
@@ -99,13 +179,15 @@ class OpenURLWindowController: NSWindowController, NSTextFieldDelegate, NSContro
 
   func controlTextDidChange(_ obj: Notification) {
     if let textView = obj.userInfo?["NSFieldEditor"] as? NSTextView, let str = textView.textStorage?.string, str.isEmpty {
+      errorMessageLabel.stringValue = invalidURLMessage
       errorMessageLabel.isHidden = true
+      urlField.textColor = .labelColor
       urlStackView.setVisibilityPriority(.notVisible, for: httpPrefixTextField)
       openButton.isEnabled = true
       return
     }
     let (url, hasScheme) = getURL()
-    if let url = url, let host = url.host {
+    if let url, let host = url.host {
       errorMessageLabel.isHidden = true
       urlField.textColor = .labelColor
       openButton.isEnabled = true
@@ -124,6 +206,7 @@ class OpenURLWindowController: NSWindowController, NSTextFieldDelegate, NSContro
       }
     } else {
       urlField.textColor = .systemRed
+      errorMessageLabel.stringValue = invalidURLMessage
       errorMessageLabel.isHidden = false
       urlStackView.setVisibilityPriority(.notVisible, for: httpPrefixTextField)
       openButton.isEnabled = false

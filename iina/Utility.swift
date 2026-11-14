@@ -7,6 +7,7 @@
 //
 
 import Cocoa
+import UniformTypeIdentifiers
 
 typealias PK = Preference.Key
 
@@ -14,9 +15,9 @@ typealias PK = Preference.Key
 class Utility {
 
   static let supportedFileExt: [MPVTrack.TrackType: [String]] = [
-    .video: ["mkv", "mp4", "avi", "m4v", "mov", "3gp", "ts", "mts", "m2ts", "wmv", "flv", "f4v", "asf", "webm", "rm", "rmvb", "qt", "dv", "mpg", "mpeg", "mxf", "vob", "gif"],
+    .video: ["mkv", "mp4", "avi", "m4v", "mov", "3gp", "ts", "mts", "m2ts", "wmv", "flv", "f4v", "asf", "webm", "rm", "rmvb", "qt", "dv", "mpg", "mpeg", "mxf", "vob", "gif", "ogv", "ogm"],
     .audio: ["mp3", "aac", "mka", "dts", "flac", "ogg", "oga", "mogg", "m4a", "ac3", "opus", "wav", "wv", "aiff", "aif", "ape", "tta", "tak"],
-    .sub: ["utf", "utf8", "utf-8", "idx", "sub", "srt", "smi", "rt", "ssa", "aqt", "jss", "js", "ass", "mks", "vtt", "sup", "scc"]
+    .sub: ["utf", "utf8", "utf-8", "idx", "sub", "srt", "smi", "rt", "ssa", "aqt", "jss", "js", "ass", "mks", "vtt", "sup", "scc", "lrc"]
   ]
   static let playableFileExt = supportedFileExt[.video]! + supportedFileExt[.audio]!
   static let singleFilePlaylistExt = ["cue"]
@@ -25,29 +26,22 @@ class Utility {
   static let blacklistExt = supportedFileExt[.sub]! + multipleFilePlaylistExt
   static let lut3dExt = ["3dl", "cube", "dat", "m3d"]
 
-  // MARK: - Logs, alerts
+  /// File types that are subtitles or can contain subtitles.
+  static let containsSubExt = supportedFileExt[.sub]! + supportedFileExt[.video]!
 
-  @available(*, deprecated, message: "showAlert(message:alertStyle:) is deprecated, use showAlert(_ key:comment:arguments:alertStyle:) instead")
-  static func showAlert(message: String, alertStyle: NSAlert.Style = .critical) {
-    let alert = NSAlert()
-    switch alertStyle {
-    case .critical:
-      alert.messageText = NSLocalizedString("alert.title_error", comment: "Error")
-    case .informational:
-      alert.messageText = NSLocalizedString("alert.title_info", comment: "Information")
-    case .warning:
-      alert.messageText = NSLocalizedString("alert.title_warning", comment: "Warning")
-    @unknown default:
-      assertionFailure("Unknown \(type(of: alertStyle)) \(alertStyle)")
-    }
-    alert.informativeText = message
-    alert.alertStyle = alertStyle
-    alert.runModal()
+  enum ValidationResult {
+    case ok
+    case valueIsEmpty
+    case valueAlreadyExists
+    case custom(String)
   }
 
-  static func showAlert(_ key: String, comment: String? = nil, arguments: [CVarArg]? = nil, style: NSAlert.Style = .critical, sheetWindow: NSWindow? = nil, suppressionKey: PK? = nil) {
+  typealias InputValidator<T> = (T) -> ValidationResult
+
+  // MARK: - Logs, alerts
+  static func showAlert(_ key: String, comment: String? = nil, arguments: [CVarArg]? = nil, style: NSAlert.Style = .critical, sheetWindow: NSWindow? = nil, suppressionKey: PK? = nil, disableMenus: Bool = false) {
     let alert = NSAlert()
-    if let suppressionKey = suppressionKey {
+    if let suppressionKey {
       // This alert includes a suppression button that allows the user to suppress the alert.
       // Do not show the alert if it has been suppressed.
       guard !Preference.bool(for: suppressionKey) else { return }
@@ -79,10 +73,21 @@ class Utility {
     }
 
     alert.alertStyle = style
-    if let sheetWindow = sheetWindow {
+
+    // If an alert occurs early during startup when the first player core is being created then
+    // menus must be disabled while the alert is shown as opening certain menus will cause the menu
+    // controller to attempt to access the player core while it is being initialized resulting in a
+    // crash. See issue #5250.
+    if disableMenus {
+      AppDelegate.shared.menuController.disableAllMenus()
+    }
+    if let sheetWindow {
       alert.beginSheetModal(for: sheetWindow)
     } else {
       alert.runModal()
+    }
+    if disableMenus {
+      AppDelegate.shared.menuController.enableAllMenus()
     }
 
     // If the user asked for this alert to be suppressed set the associated preference.
@@ -123,7 +128,7 @@ class Utility {
     panel.addButton(withTitle: NSLocalizedString("general.ok", comment: "OK"))
     panel.addButton(withTitle: NSLocalizedString("general.cancel", comment: "Cancel"))
 
-    if let sheetWindow = sheetWindow {
+    if let sheetWindow {
       panel.beginSheetModal(for: sheetWindow, completionHandler: callback)
       return false
     } else {
@@ -147,10 +152,10 @@ class Utility {
     panel.canChooseFiles = !chooseDir
     panel.canChooseDirectories = chooseDir
     panel.resolvesAliases = true
-    panel.allowedFileTypes = allowedFileTypes
+    panel.allowedContentTypes = allowedFileTypes?.compactMap { UTType(filenameExtension: $0) } ?? []
     panel.allowsMultipleSelection = false
     panel.level = .modalPanel
-    if let dir = dir {
+    if let dir {
       panel.directoryURL = dir
     }
     let handler: (NSApplication.ModalResponse) -> Void = { result in
@@ -158,7 +163,7 @@ class Utility {
         callback(url)
       }
     }
-    if let sheetWindow = sheetWindow {
+    if let sheetWindow {
       panel.beginSheetModal(for: sheetWindow, completionHandler: handler)
     } else {
       panel.begin(completionHandler: handler)
@@ -181,7 +186,7 @@ class Utility {
     panel.canChooseDirectories = canChooseDir
     panel.resolvesAliases = true
     panel.allowsMultipleSelection = true
-    if let dir = dir {
+    if let dir {
       panel.directoryURL = dir
     }
     panel.begin() { result in
@@ -199,7 +204,7 @@ class Utility {
     let panel = NSSavePanel()
     panel.title = title
     panel.canCreateDirectories = true
-    panel.allowedFileTypes = types
+    panel.allowedContentTypes = types?.compactMap { UTType(filenameExtension: $0) } ?? []
     if filename != nil {
       panel.nameFieldStringValue = filename!
     }
@@ -208,8 +213,8 @@ class Utility {
         callback(url)
       }
     }
-    if let sheetWindow = sheetWindow {
-      panel.beginSheet(sheetWindow, completionHandler: handler)
+    if let sheetWindow {
+      panel.beginSheetModal(for: sheetWindow, completionHandler: handler)
     } else {
       panel.begin(completionHandler: handler)
     }
@@ -226,30 +231,86 @@ class Utility {
    - Returns: Whether user dismissed the panel by clicking OK. Only works when using `.modal` mode.
    */
   @discardableResult
-  static func quickPromptPanel(_ key: String, titleComment: String? = nil, messageComment: String? = nil, sheetWindow: NSWindow? = nil, callback: @escaping (String) -> Void) -> Bool {
+  static func quickPromptPanel(_ key: String, titleComment: String? = nil, messageComment: String? = nil,
+                               inputValue: String? = nil, validator: InputValidator<String>? = nil,
+                               sheetWindow: NSWindow? = nil, callback: @escaping (String) -> Void) -> Bool {
     let panel = NSAlert()
     let titleKey = "alert." + key + ".title"
     let messageKey = "alert." + key + ".message"
     panel.messageText = NSLocalizedString(titleKey, comment: titleComment ?? titleKey)
     panel.informativeText = NSLocalizedString(messageKey, comment: messageComment ?? messageKey)
-    let input = NSTextField(frame: NSRect(x: 0, y: 0, width: 240, height: 24))
+
+    // accessory view
+    let input = NSTextField(frame: NSRect(x: 0, y: 0, width: 240, height: 16))
+    input.translatesAutoresizingMaskIntoConstraints = false
     input.lineBreakMode = .byClipping
     input.usesSingleLineMode = true
     input.cell?.isScrollable = true
-    panel.accessoryView = input
-    panel.addButton(withTitle: NSLocalizedString("general.ok", comment: "OK"))
-    panel.addButton(withTitle: NSLocalizedString("general.cancel", comment: "Cancel"))
+    input.isBezeled = true
+    input.bezelStyle = .roundedBezel
+    input.controlSize = .large
+    if let inputValue {
+      input.stringValue = inputValue
+    }
+    let stackView = NSStackView(frame: NSRect(x: 0, y: 0, width: 240, height: 32))
+    stackView.orientation = .vertical
+    stackView.alignment = .centerX
+    stackView.addArrangedSubview(input)
+
+    // buttons
+    let okButton = panel.addButton(withTitle: NSLocalizedString("general.ok", comment: "OK"))
+    let _ = panel.addButton(withTitle: NSLocalizedString("general.cancel", comment: "Cancel"))
     panel.window.initialFirstResponder = input
 
-    if let sheetWindow = sheetWindow {
+    // validation
+    var observer: NSObjectProtocol?
+    if let validator {
+      let label = NSTextField(labelWithString: "label")
+      label.textColor = .secondaryLabelColor
+      label.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+      stackView.addArrangedSubview(label)
+      stackView.frame = NSRect(x: 0, y: 0, width: 240, height: 54)
+
+      let validateInput = {
+        switch validator(input.stringValue) {
+        case .ok:
+          okButton.isEnabled = true
+          label.stringValue = ""
+        case .valueIsEmpty:
+          okButton.isEnabled = false
+          label.stringValue = NSLocalizedString("input.value_is_empty", comment: "Value is empty.")
+        case .valueAlreadyExists:
+          okButton.isEnabled = false
+          label.stringValue = NSLocalizedString("input.already_exists", comment: "Value already exists.")
+        case .custom(let message):
+          label.stringValue = message
+          okButton.isEnabled = false
+        }
+      }
+      observer = NotificationCenter.default.addObserver(forName: NSControl.textDidChangeNotification, object: input, queue: .main) { _ in
+        validateInput()
+      }
+      validateInput()
+    }
+
+    stackView.translatesAutoresizingMaskIntoConstraints = true
+    panel.accessoryView = stackView
+
+    if let sheetWindow {
       panel.beginSheetModal(for: sheetWindow) { response in
         if response == .alertFirstButtonReturn {
           callback(input.stringValue)
+        }
+        if let observer {
+          NotificationCenter.default.removeObserver(observer)
         }
       }
     } else {
       if panel.runModal() == .alertFirstButtonReturn {
         callback(input.stringValue)
+        if let observer {
+          NotificationCenter.default.removeObserver(observer)
+        }
         return true
       }
     }
@@ -295,7 +356,7 @@ class Utility {
     panel.addButton(withTitle: NSLocalizedString("general.ok", comment: "OK"))
     panel.addButton(withTitle: NSLocalizedString("general.cancel", comment: "Cancel"))
     panel.window.initialFirstResponder = input
-    if let sheetWindow = sheetWindow {
+    if let sheetWindow {
       panel.beginSheetModal(for: sheetWindow) { response in
         if response == .alertFirstButtonReturn {
           callback(input.stringValue, pwField.stringValue)
@@ -312,27 +373,24 @@ class Utility {
   /**
    Pop up a font picker panel.
    - parameters:
+     - sheetWindow: The window to attach as a sheet
      - callback: A closure accepting the font name.
    */
-  static func quickFontPickerWindow(callback: @escaping (String?) -> Void) {
-    guard let appDelegate = NSApp.delegate as? AppDelegate else { return }
-    appDelegate.fontPicker.finishedPicking = callback
-    appDelegate.fontPicker.showWindow(self)
+  static func quickFontPickerWindow(selecting initialSelection: String?, sheetWindow: NSWindow? = nil, callback: @escaping (String?) -> Void) {
+    let fontPicker = AppDelegate.shared.fontPicker
+    let _ = fontPicker.window  // load if not loaded
+    if let initialSelection {
+      fontPicker.select(initialSelection)
+    }
+    fontPicker.finishedPicking = callback
+    if let sheetWindow {
+      sheetWindow.beginSheet(fontPicker.window!)
+    } else {
+      fontPicker.showWindow(self)
+    }
   }
 
   // MARK: - App functions
-
-  static func iinaCopyright() -> String {
-    let infoDic = Bundle.main.infoDictionary!
-    return infoDic["NSHumanReadableCopyright"] as! String
-  }
-
-  static func iinaVersion() -> (String, String) {
-    let infoDic = Bundle.main.infoDictionary!
-    let version = infoDic["CFBundleShortVersionString"] as! String
-    let build = infoDic["CFBundleVersion"] as! String
-    return (version, build)
-  }
 
   static func createDirIfNotExist(url: URL) {
     let path = url.path
@@ -363,7 +421,7 @@ class Utility {
   static func getFilePath(Configs userConfigs: [String: Any]!, forConfig conf: String, showAlert: Bool = true) -> String? {
 
     // if is default config
-    if let dv = PrefKeyBindingViewController.defaultConfigs[conf] {
+    if let dv = SettingsPageKeyBindings.defaultConfigs[conf] {
       return dv
     } else if let uv = userConfigs[conf] as? String {
       return uv
@@ -445,10 +503,6 @@ class Utility {
                                                 attributes: FontAttributes(font: active ? .systemBold : .system, size: .system, align: .center).value)
   }
 
-  static func toRealSubScale(fromDisplaySubScale scale: Double) -> Double {
-    return scale > 0 ? scale : -1 / scale
-  }
-
   static func toDisplaySubScale(fromRealSubScale realScale: Double) -> Double {
     return realScale >= 1 ? realScale : -1 / realScale
   }
@@ -460,14 +514,27 @@ class Utility {
     }
   }
 
-  /// See `mp_get_playback_resume_config_filename` in mpv/configfiles.c
-  static func mpvWatchLaterMd5(_ filename: String) -> String {
-    // mp_is_url
-    // if(!Regex.mpvURL.matches(filename)) {
-      // ignore_path_in_watch_later_config
-    // }
-    // handle dvd:// and bd://
-    return filename.md5
+  /// Calculates and returns a MD5 sum for the given URL.
+  ///
+  /// The mpv [Watch Later](https://mpv.io/manual/stable/#watch-later) feature saves options and their values in a
+  /// file whose name is based on the MD5 sum of the media's URL. IINA calculates this MD5 sum in order to find and read the watch
+  /// later file created by `libmpv` to be able to display the saved playback progress. For this to work the MD5 sum calculated by
+  /// IINA _must_ match the sum calculated by mpv or IINA will not be able to find the file created by mpv. The mpv code of interest is
+  /// the function
+  /// [mp_get_playback_resume_config_filename](https://github.com/mpv-player/mpv/blob/f5d4d9b029affa4d5b7eb13b28d91a96e6a92280/player/configfiles.c#L213-L229).
+  /// The code of this method differs slightly due to the way IINA uses URLs.
+  ///
+  /// If the `ignorePath` parameter is `true` that means the user has enabled the mpv
+  /// [ignore-path-in-watch-later-config](https://mpv.io/manual/stable/#options-ignore-path-in-watch-later-config)
+  /// option and the MD5 sum should only use the filename and not the full path.
+  /// - Parameters:
+  ///   - url: URL of the media.
+  ///   - ignorePath: When `true`, only use the URL's filename when calculating the sum.
+  /// - Returns: The appropriate MD5 sum as a hexadecimal string.
+  static func mpvWatchLaterMd5(_ url: URL, _ ignorePath: Bool) -> String {
+    if ignorePath, url.scheme == nil || url.isFileURL { return url.lastPathComponent.md5 }
+    if url.isFileURL { return url.path.md5 }
+    return url.absoluteString.md5
   }
 
   static func playbackProgressFromWatchLater(_ mpvMd5: String) -> VideoTime? {
@@ -483,40 +550,17 @@ class Utility {
     }
   }
 
-  @available(macOS, deprecated: 10.14, message: "Use the system appearance-based APIs instead.")
-  static func getAppearanceAndMaterial(from theme: Preference.Theme) -> (NSAppearance?, NSVisualEffectView.Material) {
-    switch theme {
-    case .ultraDark:
-      return (NSAppearance(named: .vibrantDark), .ultraDark)
-    case .light:
-      return (NSAppearance(named: .vibrantLight), .light)
-    case .mediumLight:
-      return (NSAppearance(named: .vibrantLight), .mediumLight)
-    default:
-      return (NSAppearance(named: .vibrantDark), .dark)
-    }
-  }
-
   static func getLatestScreenshot(from path: String) -> URL? {
     let folder = URL(fileURLWithPath: NSString(string: path).expandingTildeInPath)
     guard let contents = try? FileManager.default.contentsOfDirectory(
       at: folder,
       includingPropertiesForKeys: [.creationDateKey],
-      options: .skipsSubdirectoryDescendants) else { return nil }
-
-    var latestDate = Date.distantPast
-    var latestFile: URL = contents[0]
-
-    for file in contents {
-      if let date = try? file.resourceValues(forKeys: [.creationDateKey]).creationDate, date > latestDate {
-        latestDate = date
-        latestFile = file
-      }
-    }
-    return latestFile
+      options: .skipsSubdirectoryDescendants),
+          !contents.isEmpty else { return nil }
+    return contents.filter { $0.creationDate != nil }.max { $0.creationDate! < $1.creationDate! }
   }
 
-  /// Make sure the block is executed on the main thread. Be careful since it uses `sync`. Keep the block mininal.
+  /// Make sure the block is executed on the main thread. Be careful since it uses `sync`. Keep the block minimal.
   @discardableResult
   static func executeOnMainThread<T>(block: () -> T) -> T {
     if Thread.isMainThread {
@@ -525,6 +569,14 @@ class Utility {
       return DispatchQueue.main.sync {
         block()
       }
+    }
+  }
+
+  static func icon(for url: URL) -> NSImage {
+    if let uttype = UTType.types(tag: url.pathExtension, tagClass: .filenameExtension, conformingTo: nil).first {
+      return NSWorkspace.shared.icon(for: uttype)
+    } else {
+      return NSWorkspace.shared.icon(for: .data)
     }
   }
 
@@ -591,7 +643,7 @@ class Utility {
         case .right:
           a.alignment = .right
         }
-        if let f = f {
+        if let f {
           NSFont.systemFont(ofSize: NSFont.systemFontSize)
           return [
             .font: f,
@@ -629,12 +681,9 @@ class Utility {
   static func resolveURLs(_ urls: [URL]) -> [URL] {
     return urls.map { (try? URL(resolvingAliasFileAt: $0)) ?? $0 }
   }
-
 }
 
 // http://stackoverflow.com/questions/33294620/
-
-
 func rawPointerOf<T : AnyObject>(obj : T) -> UnsafeRawPointer {
   return UnsafeRawPointer(Unmanaged.passUnretained(obj).toOpaque())
 }
@@ -656,3 +705,16 @@ func bridgeTransfer<T : AnyObject>(ptr : UnsafeRawPointer) -> T {
   return Unmanaged<T>.fromOpaque(ptr).takeRetainedValue()
 }
 
+enum LoopMode {
+  case off
+  case file
+  case playlist
+
+  func next() -> LoopMode {
+    switch self {
+    case .off:      return .file
+    case .file:     return .playlist
+    default:        return .off
+    }
+  }
+}

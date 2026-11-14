@@ -101,13 +101,21 @@ extension PlayerCore {
    - Returns: Whether the URL is a BD folder.
    */
   func isBDFolder(_ url: URL) -> Bool {
-    let bdmvFolder = url.appendingPathComponent("BDMV")
-    guard bdmvFolder.isExistingDirectory else { return false }
-    if let files = try? FileManager.default.contentsOfDirectory(atPath: bdmvFolder.path) {
-      return files.contains("MovieObject.bdmv") && files.contains("index.bdmv")
-    } else {
+  
+    func isBDMVFolder(_ url: URL) -> Bool {
+      if let files = try? FileManager.default.contentsOfDirectory(atPath: url.path) {
+        return files.contains("MovieObject.bdmv") && files.contains("index.bdmv")
+      }
       return false
     }
+    
+    if isBDMVFolder(url) {
+      return true
+    }
+    
+    let bdmvFolder = url.appendingPathComponent("BDMV")
+    guard bdmvFolder.isExistingDirectory else { return false }
+    return isBDMVFolder(bdmvFolder)
   }
 
   /**
@@ -132,6 +140,7 @@ extension PlayerCore {
     if types.contains(.nsFilenames) {
       guard var paths = pb.propertyList(forType: .nsFilenames) as? [String] else { return [] }
       paths = Utility.resolvePaths(paths)
+      
       // check 3d lut files
       if paths.count == 1 && Utility.lut3dExt.contains(paths[0].lowercasedPathExtension) {
         return .copy
@@ -139,11 +148,20 @@ extension PlayerCore {
 
       if isPlaylist {
         return hasPlayableFiles(in: paths) ? .copy : []
-      } else {
-        let theOnlyPathIsBDFolder = paths.count == 1 && isBDFolder(URL(fileURLWithPath: paths[0]))
-        return theOnlyPathIsBDFolder ||
-          hasPlayableFiles(in: paths) ||
-          hasSubtitleFile(in: paths) ? .copy : []
+      }
+
+      if paths.count == 1 {
+        let url = URL(fileURLWithPath: paths[0])
+
+        if isBDFolder(url)
+            || Utility.playlistFileExt.contains(url.absoluteString.lowercasedPathExtension) {
+          return .copy
+        }
+      }
+
+      if hasPlayableFiles(in: paths)
+          || hasSubtitleFile(in: paths) {
+        return .copy
       }
     } else if types.contains(.nsURL) {
       return .copy
@@ -160,7 +178,7 @@ extension PlayerCore {
      - sender: The `NSDraggingInfo` object received in `performDragOperation(_:)`.
    - Returns: The result for `performDragOperation(_:)`.
    */
-  func openFromPasteboard(_ sender: NSDraggingInfo) -> Bool {
+  func openFromPasteboard(_ sender: NSDraggingInfo, useGlobalOpenRouting: Bool = false) -> Bool {
     // get info
     let pb = sender.draggingPasteboard
     guard let types = pb.types else { return false }
@@ -182,7 +200,7 @@ extension PlayerCore {
 
       let urls = paths.map{ URL(fileURLWithPath: $0) }
       // try open files
-      guard let loadedFileCount = openURLs(urls) else { return true }
+      guard let loadedFileCount = useGlobalOpenRouting ? PlayerCore.openURLs(urls) : openURLs(urls) else { return true }
       if loadedFileCount == 0 {
         // if no playable files, try add subtitle files
         var loadedSubtitle = false

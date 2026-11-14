@@ -8,72 +8,15 @@
 
 import Cocoa
 
+fileprivate let ui = UIHelper(scope: "initial")
+
 fileprivate extension NSUserInterfaceItemIdentifier {
   static let openFile = NSUserInterfaceItemIdentifier("openFile")
   static let openURL = NSUserInterfaceItemIdentifier("openURL")
-  static let resumeLast = NSUserInterfaceItemIdentifier("resumeLast")
-}
-
-fileprivate extension NSColor {
-  static let initialWindowActionButtonBackground: NSColor = {
-    if #available(macOS 10.14, *) {
-      return NSColor(named: .initialWindowActionButtonBackground)!
-    } else {
-      return NSColor(calibratedWhite: 0, alpha: 0)
-    }
-  }()
-  static let initialWindowActionButtonBackgroundHover: NSColor = {
-    if #available(macOS 10.14, *) {
-      return NSColor(named: .initialWindowActionButtonBackgroundHover)!
-    } else {
-      return NSColor(calibratedWhite: 0, alpha: 0.25)
-    }
-  }()
-  static let initialWindowActionButtonBackgroundPressed: NSColor = {
-    if #available(macOS 10.14, *) {
-      return NSColor(named: .initialWindowActionButtonBackgroundPressed)!
-    } else {
-      return NSColor(calibratedWhite: 0, alpha: 0.35)
-    }
-  }()
-  static let initialWindowLastFileBackground: NSColor = {
-    if #available(macOS 10.14, *) {
-      return NSColor(named: .initialWindowLastFileBackground)!
-    } else {
-      return NSColor(calibratedWhite: 1, alpha: 0.1)
-    }
-  }()
-  static let initialWindowLastFileBackgroundHover: NSColor = {
-    if #available(macOS 10.14, *) {
-      return NSColor(named: .initialWindowLastFileBackgroundHover)!
-    } else {
-      return NSColor(calibratedWhite: 0.5, alpha: 0.1)
-    }
-  }()
-  static let initialWindowLastFileBackgroundPressed: NSColor = {
-    if #available(macOS 10.14, *) {
-      return NSColor(named: .initialWindowLastFileBackgroundPressed)!
-    } else {
-      return NSColor(calibratedWhite: 0, alpha: 0.1)
-    }
-  }()
-  static let initialWindowBetaLabel: NSColor = {
-    if #available(macOS 10.14, *) {
-      return NSColor(named: .initialWindowBetaLabel)!
-    } else {
-      return NSColor(calibratedRed: 1, green: 0.6, blue: 0.2, alpha: 1)
-    }
-  }()
+  static let recentFile = NSUserInterfaceItemIdentifier("recentFile")
 }
 
 fileprivate class GrayHighlightRowView: NSTableRowView {
-  private func fillWithColor(_ color: NSColor) {
-    let selectionRect = NSInsetRect(self.bounds, 2.5, 2.5)
-    color.setFill()
-    let selectionPath = NSBezierPath.init(roundedRect: selectionRect, xRadius: 4, yRadius: 4)
-    selectionPath.fill()
-  }
-  
   override func drawSelection(in dirtyRect: NSRect) {
     if self.selectionHighlightStyle != .none {
       let selectionRect = NSInsetRect(self.bounds, 0, 0)
@@ -82,48 +25,26 @@ fileprivate class GrayHighlightRowView: NSTableRowView {
       selectionPath.fill()
     }
   }
-
-  func setHoverHighlight() {
-    self.wantsLayer = true
-    self.layer?.cornerRadius = 6
-    self.layer?.backgroundColor = NSColor.initialWindowActionButtonBackgroundHover.cgColor
-  }
-
-  func unsetHoverHighlight() {
-    self.wantsLayer = true
-    self.layer?.cornerRadius = 6
-    self.layer?.backgroundColor = NSColor.initialWindowActionButtonBackground.cgColor
-  }
 }
 
 class InitialWindowController: NSWindowController {
-
-  override var windowNibName: NSNib.Name {
-    return NSNib.Name("InitialWindowController")
-  }
-
   weak var player: PlayerCore!
 
   var loaded = false
 
-  @IBOutlet weak var recentFilesTableView: NSTableView!
-  @IBOutlet weak var appIcon: NSImageView!
-  @IBOutlet weak var versionLabel: NSTextField!
-  @IBOutlet weak var visualEffectView: NSVisualEffectView!
-  @IBOutlet weak var leftOverlayView: NSView!
-  @IBOutlet weak var mainView: NSView!
-  @IBOutlet weak var betaIndicatorView: BetaIndicatorView!
-  @IBOutlet weak var lastFileContainerView: InitialWindowViewActionButton!
-  @IBOutlet weak var lastFileIcon: NSImageView!
-  @IBOutlet weak var lastFileNameLabel: NSTextField!
-  @IBOutlet weak var lastPositionLabel: NSTextField!
-  @IBOutlet weak var recentFilesTableTopConstraint: NSLayoutConstraint!
+  var recentFilesTableView: NSTableView!
+  var overlayView: NSView!
+  var lastFileContainerView: InitialWindowViewActionButton!
+  var lastFileIcon: NSImageView!
+  var lastFileNameLabel: NSTextField!
+  var lastPositionLabel: NSTextField!
+  var recentFilesTableTopConstraint: NSLayoutConstraint!
 
   private let observedPrefKeys: [Preference.Key] = [.themeMaterial]
   private var currentlyHoveredRow: GrayHighlightRowView?
 
   override func observeValue(forKeyPath keyPath: String?, of object: Any?, change: [NSKeyValueChangeKey : Any]?, context: UnsafeMutableRawPointer?) {
-    guard let keyPath = keyPath, let change = change else { return }
+    guard let keyPath, let change else { return }
 
     switch keyPath {
 
@@ -138,7 +59,7 @@ class InitialWindowController: NSWindowController {
   }
 
   lazy var recentDocuments: [URL] = {
-    NSDocumentController.shared.recentDocumentURLs.filter { $0 != lastPlaybackURL }
+    makeRecentDocumentsList()
   }()
   private var lastPlaybackURL: URL?
 
@@ -151,58 +72,226 @@ class InitialWindowController: NSWindowController {
     fatalError("init(coder:) has not been implemented")
   }
 
-  override func windowDidLoad() {
-    super.windowDidLoad()
-    loaded = true
+  override func showWindow(_ sender: Any?) {
+    if !loaded {
+      createWindow()
+    }
+    super.showWindow(sender)
+  }
 
-    window?.titlebarAppearsTransparent = true
-    window?.titleVisibility = .hidden
-    window?.isMovableByWindowBackground = true
+  private func createWindow() {
+    let paddingH = CGFloat(30)
 
-    window?.contentView?.registerForDraggedTypes([.nsFilenames, .nsURL, .string])
+    let window = CommonWindow(
+      contentRect: NSRect(x: 0, y: 0, width: 560, height: 440),
+      styleMask: [.titled, .closable, .miniaturizable, .fullSizeContentView],
+      backing: .buffered,
+      defer: false
+    )
+    window.setFrameAutosaveName("IINAWelcomeWindow")
+    window.titlebarAppearsTransparent = true
+    window.titleVisibility = .hidden
+    window.isMovableByWindowBackground = true
 
+    let contentView = InitialWindowContentView()
+    window.contentView = contentView
+    window.initialFirstResponder = contentView
+
+    let mainView = NSView()
+    mainView.translatesAutoresizingMaskIntoConstraints = false
     mainView.wantsLayer = true
+    contentView.addSubview(mainView)
+    mainView.padding(.all)
 
-    let (version, build) = Utility.iinaVersion()
-    let isStableRelease = !version.contains("-")
-    versionLabel.stringValue = isStableRelease ? version : "\(version) (\(build))"
-    betaIndicatorView.isHidden = isStableRelease
+    let visualEffectView = NSVisualEffectView()
+    visualEffectView.translatesAutoresizingMaskIntoConstraints = false
+    visualEffectView.blendingMode = .behindWindow
+    visualEffectView.material = .underWindowBackground
+    visualEffectView.state = .active
+    mainView.addSubview(visualEffectView)
+    visualEffectView.padding(.all)
 
-    loadLastPlaybackInfo()
+    self.overlayView = NSView()
+    overlayView.translatesAutoresizingMaskIntoConstraints = false
+    mainView.addSubview(overlayView)
+    overlayView.padding(.all)
+
+    let infoButton = NSButton()
+    infoButton.translatesAutoresizingMaskIntoConstraints = false
+    infoButton.bezelStyle = .circular
+    infoButton.isBordered = false
+    infoButton.controlSize = .large
+    infoButton.image = .sf("info.circle")?.tinted(.systemOrange)
+    infoButton.target = self
+    infoButton.action = #selector(showBetaInfoPopover)
+    mainView.addSubview(infoButton)
+    infoButton.padding(.trailing(16), .top(16))
+
+    // header
+
+    let iconImage = NSWorkspace.shared.icon(forFile: Bundle.main.bundlePath)
+    let appIcon = ui.image(iconImage, size: 68)
+    appIcon.translatesAutoresizingMaskIntoConstraints = false
+
+    let iinaLabel = NSTextField(labelWithString: "IINA")
+    iinaLabel.font = .systemFont(ofSize: 20, weight: .bold)
+    let versionLabel = NSTextField(labelWithString: "")
+    versionLabel.translatesAutoresizingMaskIntoConstraints = false
+    versionLabel.textColor = .secondaryLabelColor
+
+    let header = ui.hStack(spacing: 12, appIcon, ui.vStack(spacing: 4, iinaLabel, versionLabel))
+    mainView.addSubview(header)
+    header.padding(.top(48), .leading(paddingH - 6), .trailing(paddingH))
+
+    // open button
+
+    let openFileButton = ui.button("open", target: AppDelegate.shared,
+                                   action: #selector(AppDelegate.openFile(_:)))
+    let openURLButton = ui.button("open_url", target: AppDelegate.shared,
+                                  action: #selector(AppDelegate.openURL(_:)))
+    openFileButton.controlSize = .large
+    openURLButton.controlSize = .large
+    let actions = ui.hStack(spacing: 12, openFileButton, openURLButton)
+    mainView.addSubview(actions)
+    actions.padding(.top(64), .trailing(paddingH))
+
+    // resume last file
+
+    self.lastFileContainerView = InitialWindowViewActionButton()
+    lastFileContainerView.translatesAutoresizingMaskIntoConstraints = false
+    lastFileContainerView.size(height: 32)
+    self.lastFileIcon = ui.image("clock.arrow.trianglehead.counterclockwise.rotate.90", "clock", size: 16)
+    let resumeLabel = ui.label("resume", canCompress: false)
+    self.lastFileNameLabel = NSTextField(labelWithString: "")
+    lastFileNameLabel.translatesAutoresizingMaskIntoConstraints = false
+    lastFileNameLabel.lineBreakMode = .byTruncatingMiddle
+    lastFileNameLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+    self.lastPositionLabel = NSTextField(labelWithString: "")
+    lastPositionLabel.translatesAutoresizingMaskIntoConstraints = false
+    lastPositionLabel.textColor = .secondaryLabelColor
+    lastPositionLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+    let lastFileRow = ui.hStack(spacing: 6,
+                                lastFileIcon, resumeLabel, lastFileNameLabel,
+                                ui.flexibleSpace(),
+                                lastPositionLabel)
+    lastFileContainerView.addSubview(lastFileRow)
+    lastFileRow.padding(.horizontal(10), .vertical(6))
+
+    mainView.addSubview(lastFileContainerView)
+    lastFileContainerView.spacing(.top(16), to: header).padding(.horizontal(paddingH))
+
+    // table
+
+    self.recentFilesTableView = NSTableView()
+    recentFilesTableView.headerView = nil
+    recentFilesTableView.backgroundColor = .clear
+    recentFilesTableView.rowHeight = 28
+    recentFilesTableView.style = .plain
+    recentFilesTableView.columnAutoresizingStyle = .lastColumnOnlyAutoresizingStyle
+    recentFilesTableView.addTableColumn(NSTableColumn(identifier: .recentFile))
+    let scrollView = NSScrollView()
+    scrollView.translatesAutoresizingMaskIntoConstraints = false
+    scrollView.drawsBackground = false
+    scrollView.hasVerticalScroller = true
+    scrollView.autohidesScrollers = true
+    scrollView.documentView = recentFilesTableView
+
+    mainView.addSubview(scrollView)
+    self.recentFilesTableTopConstraint = scrollView.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 24)
+    recentFilesTableTopConstraint.isActive = true
+    scrollView.padding(.bottom(24), .horizontal(paddingH - 6))
+
+    self.window = window
+    // make the content view the first responder, so key events are received by keyDown()
+    recentFilesTableView.refusesFirstResponder = true
+    window.autorecalculatesKeyViewLoop = false
+    window.initialFirstResponder = contentView
+    window.makeFirstResponder(nil)
+
+    loaded = true
+    appIcon.unregisterDraggedTypes()
+    contentView.registerForDraggedTypes([.nsFilenames, .nsURL, .string])
+
+    let infoDict = InfoDictionary.shared
+    let (version, build) = infoDict.version
+    switch infoDict.buildType {
+    case .release:
+      versionLabel.stringValue = version
+      infoButton.isHidden = true
+    case .beta:
+      versionLabel.stringValue = "\(version) (build \(build))"
+    case .nightly:
+      versionLabel.stringValue = "\(version)+g\(infoDict.shortCommitSHA ?? "")"
+    case .debug:
+      versionLabel.stringValue = "\(version)+g\(infoDict.shortCommitSHA ?? "")"
+    }
 
     recentFilesTableView.delegate = self
     recentFilesTableView.dataSource = self
     recentFilesTableView.action = #selector(self.onTableClicked)
-    recentFilesTableView.addTrackingArea(NSTrackingArea(rect: recentFilesTableView.bounds,
-                                        options: [.activeInKeyWindow, .mouseMoved], owner: self, userInfo: nil))
-    recentFilesTableView.addTrackingArea(NSTrackingArea(rect: recentFilesTableView.bounds,
-                                                        options: [.activeInKeyWindow, .mouseEnteredAndExited], owner: self, userInfo: nil))
-
     setMaterial(Preference.enum(for: .themeMaterial))
-
     observedPrefKeys.forEach { key in
       UserDefaults.standard.addObserver(self, forKeyPath: key.rawValue, options: .new, context: nil)
     }
     reloadData()
   }
 
-  private func setMaterial(_ theme: Preference.Theme?) {
-    guard let window = window, let theme = theme else { return }
-    if #available(macOS 10.14, *) {
-      window.appearance = NSAppearance(iinaTheme: theme)
-      if #available(macOS 10.16, *) {
-        let gradientLayer = CAGradientLayer()
-        gradientLayer.colors = window.effectiveAppearance.isDark ?
-          [NSColor.black.withAlphaComponent(0.4).cgColor, NSColor.black.withAlphaComponent(0).cgColor] :
-          [NSColor.black.withAlphaComponent(0.1).cgColor, NSColor.black.withAlphaComponent(0).cgColor]
-        leftOverlayView.wantsLayer = true
-        leftOverlayView.layer = gradientLayer
+  @objc private func showBetaInfoPopover(_ sender: NSButton) {
+    let width = CGFloat(240)
+    let labels = [
+      "announcement",
+      "want_to_rollback",
+      "rollback",
+      "found_bug",
+      "bug_report"
+    ].enumerated().map { (index, key) in
+      let label = ui.label(key, wrapping: true, canCompress: false)
+      label.size(width: width)
+      if index == 0 {
+        label.textColor = .secondaryLabelColor
+        label.font = NSFont.boldSystemFont(ofSize: NSFont.systemFontSize)
+      } else {
+        label.font = if index % 2 == 1 {
+          NSFont.boldSystemFont(ofSize: NSFont.systemFontSize)
+        } else {
+          NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)
+        }
       }
-    } else {
-      window.appearance = NSAppearance(named: .vibrantDark)
-      mainView.layer?.backgroundColor = CGColor(gray: 0.1, alpha: 1)
-      visualEffectView.material = .ultraDark
+      label.setHTMLValue(ui.localized(key))
+      return label
     }
+    let view = NSView()
+    let stackView = ui.vStack(spacing: 10, labels)
+    view.addSubview(stackView)
+    stackView.padding(.all(20))
+    let popover = NSPopover()
+    popover.behavior = .transient
+    popover.contentViewController = NSViewController()
+    popover.contentViewController?.view = view
+    popover.contentSize = NSSize(width: width + 20 * 2, height: 200)
+    popover.show(relativeTo: sender.bounds, of: sender, preferredEdge: .maxY)
+  }
+
+  private func makeRecentDocumentsList() -> [URL] {
+    // Need to call resolvingSymlinksInPath() on both sides, because it changes "/private/var" to "/var" as a special case,
+    // even though "/var" points to "/private/var" (i.e. it changes it the opposite direction from what is expected).
+    // This is probably a kludge on Apple's part to avoid breaking legacy FreeBSD code.
+    NSDocumentController.shared.recentDocumentURLs.filter { $0.resolvingSymlinksInPath() != lastPlaybackURL?.resolvingSymlinksInPath() }
+  }
+
+  private func setMaterial(_ theme: Preference.Theme?) {
+    guard let window, let theme else { return }
+
+    window.appearance = NSAppearance(iinaTheme: theme)
+
+    let gradientLayer = CAGradientLayer()
+    gradientLayer.colors = window.effectiveAppearance.isDark ?
+    [NSColor.black.withAlphaComponent(0.4).cgColor, NSColor.black.withAlphaComponent(0.1).cgColor] :
+      [NSColor.black.withAlphaComponent(0.1).cgColor, NSColor.black.withAlphaComponent(0).cgColor]
+    overlayView.wantsLayer = true
+    overlayView.layer = gradientLayer
+
+    lastFileContainerView.updateBackground()
   }
 
   @objc func onTableClicked() {
@@ -216,6 +305,7 @@ class InitialWindowController: NSWindowController {
   }
 
   func loadLastPlaybackInfo() {
+    guard loaded else { return }
     if Preference.bool(for: .recordRecentFiles),
       Preference.bool(for: .resumeLastPosition),
       let lastFile = Preference.url(for: .iinaLastPlayedFilePath),
@@ -223,25 +313,36 @@ class InitialWindowController: NSWindowController {
       // if last file exists
       lastPlaybackURL = lastFile
       lastFileContainerView.isHidden = false
-      lastFileContainerView.normalBackground = NSColor.initialWindowLastFileBackground
-      lastFileContainerView.hoverBackground = NSColor.initialWindowLastFileBackgroundHover
-      lastFileContainerView.pressedBackground = NSColor.initialWindowLastFileBackgroundPressed
-      lastFileIcon.image = #imageLiteral(resourceName: "history")
+      lastFileIcon.image = .sf("clock.arrow.trianglehead.counterclockwise.rotate.90", "clock")
       lastFileNameLabel.stringValue = lastFile.lastPathComponent
       let lastPosition = Preference.double(for: .iinaLastPlayedFilePosition)
       lastPositionLabel.stringValue = VideoTime(lastPosition).stringRepresentation
-      recentFilesTableTopConstraint.constant = 42
+      recentFilesTableTopConstraint.constant = 42 + 18
     } else {
       lastPlaybackURL = nil
       lastFileContainerView.isHidden = true
-      recentFilesTableTopConstraint.constant = 24
+      recentFilesTableTopConstraint.constant = 42
     }
   }
 
   func reloadData() {
+    guard loaded else { return }
     loadLastPlaybackInfo()
-    recentDocuments = NSDocumentController.shared.recentDocumentURLs.filter { $0 != lastPlaybackURL }
+    recentDocuments = makeRecentDocumentsList()
     recentFilesTableView.reloadData()
+
+    if Logger.isEmitting(.verbose) {
+      let last = lastPlaybackURL.flatMap { $0.resolvingSymlinksInPath().path } ?? "<none>"
+      Logger.log("InitialWindow.reloadData(): LastPlaybackURL: \(last)", level: .verbose)
+
+      for (index, url) in NSDocumentController.shared.recentDocumentURLs.enumerated() {
+        Logger.log("InitialWindow.reloadData(): RecentDocuments_Unfiltered[\(index)]: \(url.resolvingSymlinksInPath().path)", level: .verbose)
+      }
+
+      for (index, url) in recentDocuments.enumerated() {
+        Logger.log("InitialWindow.reloadData(): Loaded RecentDocuments[\(index)]: \(url.resolvingSymlinksInPath().path)", level: .verbose)
+      }
+    }
     
     if lastFileContainerView.isHidden && recentFilesTableView.numberOfRows > 0 {
       recentFilesTableView.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
@@ -256,49 +357,48 @@ extension InitialWindowController: NSTableViewDelegate, NSTableViewDataSource {
     return GrayHighlightRowView()
   }
 
-  func tableViewSelectionDidChange(_ notification: Notification) {
-    updateLastFileButtonHighlight()
-  }
-
   func numberOfRows(in tableView: NSTableView) -> Int {
     return recentDocuments.count
   }
 
-  func tableView(_ tableView: NSTableView, objectValueFor tableColumn: NSTableColumn?, row: Int) -> Any? {
-    let url = recentDocuments[row]
-    return [
-      "filename": url.lastPathComponent,
-      "docIcon": NSWorkspace.shared.icon(forFile: url.path)
-    ]
-  }
-
-  // facilitates highlight on hover
-  override func mouseMoved(with event: NSEvent) {
-    let mouseLocation = event.locationInWindow
-    let point = recentFilesTableView.convert(mouseLocation, from: nil)
-    let rowIndex = recentFilesTableView.row(at: point)
-
-    if rowIndex >= 0 {
-      guard let rowView = recentFilesTableView.rowView(atRow: rowIndex, makeIfNecessary: false) as? GrayHighlightRowView else {
-        return
-      }
-
-      if (currentlyHoveredRow == rowView) {
-        return
-      }
-
-      rowView.setHoverHighlight()
-      currentlyHoveredRow?.unsetHoverHighlight()
-      currentlyHoveredRow = rowView
+  func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
+    let cell: NSTableCellView
+    if let reusableCell = tableView.makeView(withIdentifier: .recentFile, owner: self) as? NSTableCellView {
+      cell = reusableCell
     } else {
-      currentlyHoveredRow?.unsetHoverHighlight()
-      currentlyHoveredRow = nil
+      cell = NSTableCellView()
+      cell.identifier = .recentFile
+      let icon = ui.image(nil, size: 16)
+      icon.translatesAutoresizingMaskIntoConstraints = false
+      let label = NSTextField(labelWithString: "")
+      label.translatesAutoresizingMaskIntoConstraints = false
+      label.lineBreakMode = .byTruncatingMiddle
+      label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+      cell.imageView = icon
+      cell.textField = label
+      cell.addSubview(icon)
+      cell.addSubview(label)
+      icon.padding(.leading(8))
+      icon.center(.y)
+      label.spacing(.leading(6), to: icon)
+      label.padding(.trailing(8))
+      label.center(.y)
     }
+
+    let url = recentDocuments[row]
+    cell.imageView?.image = NSWorkspace.shared.icon(forFile: url.path)
+    cell.textField?.stringValue = url.lastPathComponent
+    return cell
   }
 
-  override func mouseExited(with event: NSEvent) {
-    currentlyHoveredRow?.unsetHoverHighlight()
-    currentlyHoveredRow = nil
+  func tableViewSelectionDidChange(_ notification: Notification) {
+    if recentFilesTableView.selectedRow >= 0 {
+      // remove "LastFile" button highlight
+      lastFileContainerView.updateBackground(.clear)
+    } else {
+      // re-highlight "LastFile" button
+      lastFileContainerView.updateBackground()
+    }
   }
 
   override func keyDown(with event: NSEvent) {
@@ -342,17 +442,6 @@ extension InitialWindowController: NSTableViewDelegate, NSTableViewDataSource {
         super.keyDown(with: event)
     }
   }
-
-  func updateLastFileButtonHighlight() {
-    if recentFilesTableView.selectedRow >= 0 {
-      // remove "LastFle" button highlight
-      lastFileContainerView.layer?.backgroundColor = NSColor.initialWindowActionButtonBackground.cgColor
-    } else {
-      // re-highlight "LastFle" button
-      lastFileContainerView.layer?.backgroundColor = NSColor.initialWindowLastFileBackground.cgColor
-    }
-  }
-
 }
 
 
@@ -367,98 +456,57 @@ class InitialWindowContentView: NSView {
   }
 
   override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
-    return player.openFromPasteboard(sender)
+    return player.openFromPasteboard(sender, useGlobalOpenRouting: true)
   }
 
 }
 
 
 class InitialWindowViewActionButton: NSView {
+  let normalBackground = NSColor.initialWindowLastFileBackground
+  let hoverBackground = NSColor.initialWindowLastFileBackgroundHover
+  let pressedBackground = NSColor.initialWindowLastFileBackgroundPressed
 
-  var normalBackground = NSColor.initialWindowActionButtonBackground {
-    didSet {
-      self.layer?.backgroundColor = normalBackground.cgColor
-    }
+  override init(frame frameRect: NSRect) {
+    super.init(frame: frameRect)
+    setup()
   }
-  var hoverBackground = NSColor.initialWindowActionButtonBackgroundHover
-  var pressedBackground = NSColor.initialWindowActionButtonBackgroundPressed
 
-  var action: Selector?
+  required init?(coder: NSCoder) {
+    super.init(coder: coder)
+    setup()
+  }
 
-  override func awakeFromNib() {
+  private func setup() {
     self.wantsLayer = true
-    self.layer?.cornerRadius = 6
-    self.layer?.backgroundColor = normalBackground.cgColor
-    self.addTrackingArea(NSTrackingArea(rect: self.bounds, options: [.activeInKeyWindow, .mouseEnteredAndExited], owner: self, userInfo: nil))
+    self.layer?.cornerRadius = 8
+    self.addTrackingArea(NSTrackingArea(rect: .zero,
+      options: [.activeInKeyWindow, .mouseEnteredAndExited, .inVisibleRect], owner: self, userInfo: nil))
   }
 
   override func mouseEntered(with event: NSEvent) {
-    if let windowController = window?.windowController as? InitialWindowController {
-      if windowController.recentFilesTableView.selectedRow >= 0 {
-        self.layer?.backgroundColor = NSColor.initialWindowActionButtonBackgroundHover.cgColor
-      } else {
-        self.layer?.backgroundColor = hoverBackground.cgColor
-      }
-    }
+    updateBackground(hoverBackground)
   }
 
   override func mouseExited(with event: NSEvent) {
-    self.layer?.backgroundColor = normalBackground.cgColor
-    if let windowController = window?.windowController as? InitialWindowController {
-      windowController.updateLastFileButtonHighlight()
-    }
+    updateBackground(normalBackground)
   }
 
   override func mouseDown(with event: NSEvent) {
-    self.layer?.backgroundColor = pressedBackground.cgColor
-    if self.identifier == .openFile {
-      (NSApp.delegate as! AppDelegate).openFile(self)
-    } else if self.identifier == .openURL {
-      (NSApp.delegate as! AppDelegate).openURL(self)
-    } else {
-      if let lastFile = Preference.url(for: .iinaLastPlayedFilePath),
-        let windowController = window?.windowController as? InitialWindowController {
-        windowController.player.openURL(lastFile)
-      }
+    updateBackground(pressedBackground)
+    if let lastFile = Preference.url(for: .iinaLastPlayedFilePath),
+       let windowController = window?.windowController as? InitialWindowController {
+      windowController.player.openURL(lastFile)
     }
   }
 
   override func mouseUp(with event: NSEvent) {
-    self.layer?.backgroundColor = hoverBackground.cgColor
+    updateBackground(hoverBackground)
   }
 
-}
-
-
-class BetaIndicatorView: NSView {
-
-  @IBOutlet var betaPopover: NSPopover!
-  @IBOutlet var text1: NSTextField!
-  @IBOutlet var text2: NSTextField!
-
-  override func awakeFromNib() {
-    self.layer?.backgroundColor = NSColor.initialWindowBetaLabel.cgColor
-    self.layer?.cornerRadius = 4
-    self.addTrackingArea(NSTrackingArea(rect: self.bounds, options: [.activeInKeyWindow, .mouseEnteredAndExited], owner: self, userInfo: nil))
-
-    text1.setHTMLValue(text1.stringValue)
-    text2.setHTMLValue(text2.stringValue)
-  }
-
-  override func mouseEntered(with event: NSEvent) {
-    NSCursor.pointingHand.push()
-  }
-
-  override func mouseExited(with event: NSEvent) {
-    NSCursor.pop()
-  }
-
-  override func mouseUp(with event: NSEvent) {
-    if betaPopover.isShown {
-      betaPopover.close()
-    } else {
-      betaPopover.show(relativeTo: self.bounds, of: self, preferredEdge: .maxX)
+  func updateBackground(_ color: NSColor? = nil) {
+    effectiveAppearance.performAsCurrentDrawingAppearance {
+      self.layer?.backgroundColor = (color ?? normalBackground).cgColor
     }
   }
-
 }

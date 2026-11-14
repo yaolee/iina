@@ -1,5 +1,8 @@
 name: CI
 
+permissions:
+  contents: read
+
 on:
   push:
       branches: [develop]
@@ -8,13 +11,37 @@ on:
 
 jobs:
   build:
-    # FIXME: This builds with macOS 10.15. Move this to the 11.0 builders when possible. (See: https://github.com/actions/virtual-environments/issues/2486)
-    runs-on:  macos-latest
+    strategy:
+      matrix:
+        include:
+          - xcode: "27"
+            deployment_target: ""
+    runs-on:  xcode-27
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v7
 
       - name: Install dependencies
-        run: ./other/download_libs.sh
+        run: ./other/download_libs.sh $DOWNLOAD_LIBS_ARGS
+        env:
+          DOWNLOAD_LIBS_ARGS: ${{ github.event_name == 'pull_request' && '--skip-plugins' || '' }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build
-        run: xcodebuild -project iina.xcodeproj -scheme iina CODE_SIGNING_ALLOWED=NO
+        run: xcodebuild -project iina.xcodeproj ONLY_ACTIVE_ARCH=NO -scheme iina -derivedDataPath . -configuration Nightly ${{ matrix.deployment_target }}
+        env:
+          DEVELOPER_DIR: /Applications/Xcode_${{ matrix.xcode }}.app/Contents/Developer
+
+      - name: Create DMG
+        run: |
+          dmg_dir="$(mktemp -d)"
+          trap 'rm -rf "$dmg_dir"' EXIT
+          ditto Build/Products/Nightly/IINA.app "$dmg_dir/IINA.app"
+          ln -s /Applications "$dmg_dir/Applications"
+          hdiutil create -volname "IINA Nightly" -srcfolder "$dmg_dir" -ov -format UDZO IINA.dmg
+
+      - name: Save artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: IINA
+          path: IINA.dmg
+          archive: false

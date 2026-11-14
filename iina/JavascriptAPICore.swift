@@ -12,7 +12,7 @@ import JavaScriptCore
 // MARK: Core API
 
 @objc protocol JavascriptAPICoreExportable: JSExport {
-  func open(_ url: String)
+  func open(_ urlString: String)
   func osd(_ message: String)
   func pause()
   func resume()
@@ -26,6 +26,7 @@ import JavaScriptCore
   func getHistory() -> Any
   func getRecentDocuments() -> Any
   func getVersion() -> Any
+  func getTheme() -> [String: Any]
 }
 
 class JavascriptAPICore: JavascriptAPI, JavascriptAPICoreExportable {
@@ -50,8 +51,8 @@ class JavascriptAPICore: JavascriptAPI, JavascriptAPICoreExportable {
     }
   }
 
-  func open(_ url: String) {
-    if let url = parsePath(url, forceLocalPath: false).path {
+  func open(_ urlString: String) {
+    if let url = shouldOpenURL(urlString) {
       Utility.executeOnMainThread {
         player!.openURLString(url)
       }
@@ -105,14 +106,16 @@ class JavascriptAPICore: JavascriptAPI, JavascriptAPICoreExportable {
   }
 
   func getHistory() -> Any {
-    return HistoryController.shared.history.map {
-      [
-        "name": $0.name,
-        "url": $0.url.absoluteString,
-        "date": $0.addedDate,
-        "progress": $0.mpvProgress?.second ?? NSNull(),
-        "duration": $0.duration.second
-      ]
+    HistoryController.shared.$history.withLock {
+      $0.map {
+        [
+          "name": $0.name,
+          "url": $0.url.absoluteString,
+          "date": $0.addedDate,
+          "progress": $0.mpvProgress?.second ?? NSNull(),
+          "duration": $0.duration.second
+        ] as [String: Any]
+      }
     }
   }
 
@@ -126,11 +129,20 @@ class JavascriptAPICore: JavascriptAPI, JavascriptAPICoreExportable {
   }
 
   func getVersion() -> Any {
-    let (iinaVersion, build) = Utility.iinaVersion()
+    let (iinaVersion, build) = InfoDictionary.shared.version
     return [
       "iina": iinaVersion,
       "build": build,
-      "mpv": PlayerCore.first.mpv.mpvVersion
+      "mpv": MPVOptionDefaults.shared.mpvVersion
+    ]
+  }
+
+  func getTheme() -> [String: Any] {
+    let theme: Preference.Theme = Preference.enum(for: .themeMaterial)
+    let appearance = NSAppearance(iinaTheme: theme) ?? NSApp.effectiveAppearance
+    return [
+      "appearance": appearance.isDark ? "dark" : "light",
+      "accentColor": NSColor.controlAccentColor.hexString
     ]
   }
 }
@@ -141,7 +153,7 @@ fileprivate func serialize(track: MPVTrack) -> [String: Any] {
   return [
     "id": track.id,
     "title": track.title ?? NSNull(),
-    "formattedTitie": track.readableTitle,
+    "formattedTitle": track.readableTitle,
     "lang": track.lang ?? NSNull(),
     "codec": track.codec ?? NSNull(),
     "isDefault": track.isDefault,
@@ -204,7 +216,9 @@ fileprivate class TrackAPI: JavascriptAPI, TrackAPIExportable {
       log("loadTrack: the url must be a string", level: .error)
       return
     }
-    let url = URL(fileURLWithPath: urlString)
+    guard let urlString = shouldOpenURL(urlString) else { return }
+    let parsedURL = URL(string: urlString)
+    let url = parsedURL?.scheme == nil ? URL(fileURLWithPath: urlString) : parsedURL!
     switch type {
     case .audio: player!.loadExternalAudioFile(url)
     case .sub, .secondSub: player!.loadExternalSubFile(url)
@@ -234,9 +248,9 @@ fileprivate class WindowAPI: JavascriptAPI, CoreSubAPIExportable {
     case "ontop":
       return window.isOntop
     case "visible":
-      return window.window!.occlusionState == .visible
+      return window.window!.occlusionState.contains(.visible)
     case "sidebar":
-      return window.sideBarStatus == .settings ? window.quickSettingView.currentTab.name : NSNull()
+      return window.sidebars.isShowing(.settings) ? window.sidebars.quickSettingView.currentTab.name : NSNull()
     case "screens":
       let current = window.window!.screen!
       let main = NSScreen.main
@@ -250,6 +264,8 @@ fileprivate class WindowAPI: JavascriptAPI, CoreSubAPIExportable {
         return ["frame": frame, "main": screen == main, "current": screen == current]
       }
       return screens
+    case "miniaturized":
+      return window.window!.isMiniaturized
     default:
       return nil
     }
@@ -272,28 +288,27 @@ fileprivate class WindowAPI: JavascriptAPI, CoreSubAPIExportable {
       guard let val = value as? Bool, val != window.fsState.isFullscreen else { return }
       window.toggleWindowFullScreen()
     case "pip":
-      if #available(OSX 10.12, *) {
-        guard let val = value as? Bool else { return }
-        if val {
-          window.enterPIP()
-        } else {
-          window.exitPIP()
-        }
+      guard let val = value as? Bool else { return }
+      if val {
+        window.enterPIP()
+      } else {
+        window.exitPIP()
       }
     case "ontop":
       guard let val = value as? Bool else { return }
       window.setWindowFloatingOnTop(val)
     case "sidebar":
       if let name = value as? String {
-        if let tabType = QuickSettingViewController.TabViewType(name: name) {
-          window.showSettingsSidebar(tab: tabType, force: true, hideIfAlreadyShown: false)
-        } else if let tabType = PlaylistViewController.TabViewType(name: name) {
-          window.showPlaylistSidebar(tab: tabType, force: true, hideIfAlreadyShown: false)
-        } else {
-          log("core.window.sidebar: Unknown sidebar name \"\(name)\"", level: .error)
-        }
+        window.sidebars.show(tab: name, force: true, hideIfAlreadyShown: false)
       } else {
-        window.hideSideBar(animate: true)
+        window.sidebars.hideAllSideBars()
+      }
+    case "miniaturized":
+      guard let val = value as? Bool else { return }
+      if val {
+        window.window!.miniaturize(self)
+      } else {
+        window.window!.deminiaturize(self)
       }
     default:
       log("core.window: \(prop) is not accessible", level: .warning)
@@ -307,12 +322,15 @@ fileprivate class StatusAPI: JavascriptAPI, CoreSubAPIExportable {
   func __proxyGet(_ prop: String) -> Any? {
     switch prop {
     case "paused":
-      return !player!.info.isPlaying
+      return player!.info.state == .paused
     case "idle":
-      return player!.info.isIdle
+      return player!.info.state == .idle
     case "position":
+      player!.syncPositionIfNeeded()
       return player!.info.videoPosition?.second ?? NSNull()
     case "duration":
+      // When streaming the duration changes. Syncing the position will also update the duration.
+      player!.syncPositionIfNeeded()
       return player!.info.videoDuration?.second ?? NSNull()
     case "speed":
       return player!.info.playSpeed
@@ -326,6 +344,8 @@ fileprivate class StatusAPI: JavascriptAPI, CoreSubAPIExportable {
       return player!.info.isNetworkResource
     case "url":
       return player!.info.currentURL?.absoluteString.removingPercentEncoding ?? NSNull()
+    case "title":
+      return player!.getMediaTitle(withExtension: false)
     default:
       return nil
     }

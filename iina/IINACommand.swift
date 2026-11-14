@@ -21,6 +21,7 @@ enum IINACommand: String {
   case chapterPanel = "chapter-panel"
 
   case toggleMusicMode = "toggle-music-mode"
+  case liveText = "live-text"
 
   case flip = "toggle-flip"
   case mirror = "toggle-mirror"
@@ -30,6 +31,7 @@ enum IINACommand: String {
   case fitToScreen = "fit-to-screen"
 
   case saveCurrentPlaylist = "save-playlist"
+  case showCurrentFileInFinder = "show-current-file-in-finder"
   case deleteCurrentFile = "delete-current-file"
   case deleteCurrentFileHard = "delete-current-file-hard"
 

@@ -8,7 +8,33 @@
 
 import Foundation
 
+/// Information about playback that is associated with a `PlayerCore`.
+/// - Important: Much of the information contained in this class is constantly read by user interface classes and relatively
+///     infrequently updated. To avoid the overhead of locks the convention for properties in this class is to only access them
+///     using the main thread.
+///
+///     Some properties are annotated with the `@Atomic` property wrapper. allowing access from multiple threads. This was
+///     done to quickly correct thread sanitizer errors in existing code. That code may be updated in the future to eliminate the
+///     need for locks for these properties.
 class PlaybackInfo {
+
+  /// Enumeration representing the status of the [mpv](https://mpv.io/manual/stable/) A-B loop command.
+  ///
+  /// The A-B loop command cycles mpv through these states:
+  /// - Cleared (looping disabled)
+  /// - A loop point set
+  /// - B loop point set (looping enabled)
+  enum LoopStatus {
+    case cleared
+    case aSet
+    case bSet
+  }
+
+  enum MediaIsAudioStatus {
+    case unknown
+    case isAudio
+    case notAudio
+  }
 
   unowned let player: PlayerCore
 
@@ -16,23 +42,59 @@ class PlaybackInfo {
     player = pc
   }
 
-  var isIdle: Bool = true {
+  /// The state the `PlayerCore` is in.
+  ///
+  /// A computed property is used to prevent inappropriate state changes and perform actions based on the state changing. The
+  /// following rules are enforced on state changes:
+  /// - `loading` is not allowed to change to `idle`
+  /// - `stopping` is only allowed to change to `idle`
+  /// - `shuttingDown` is only allowed to change to `shutDown`
+  /// - `shutDown` is not allowed to change to any other state
+  var state: PlayerState = .idle {
     didSet {
-      PlayerCore.checkStatusForSleep()
-    }
-  }
-  var fileLoading: Bool = false
-
-  var currentURL: URL? {
-    didSet {
-      if let url = currentURL {
-        mpvMd5 = Utility.mpvWatchLaterMd5(url.path)
-      } else {
-        mpvMd5 = nil
+      // Nothing to do if the old state matches the state that was just assigned.
+      guard state != oldValue else { return }
+      // Block inappropriate state changes.
+      guard oldValue != .loading || state != .idle, oldValue != .stopping || state == .idle,
+            oldValue != .shuttingDown || state == .shutDown, oldValue != .shutDown else {
+        player.log("Blocked attempt to change state from \(oldValue) to \(state)", level: .error)
+        state = oldValue
+        return
+      }
+      player.log("State changed from \(oldValue) to \(state)")
+      switch state {
+      case .idle:
+        SleepPreventer.updateSleepPrevention()
+        NowPlayingInfoManager.shared.updateInfo()
+      case .playing:
+        SleepPreventer.updateSleepPrevention()
+        if player == PlayerCore.lastActive {
+          NowPlayingInfoManager.shared.updateInfo()
+          if player.mainWindow.pipStatus == .inPIP {
+            player.mainWindow.pip.playing = true
+          }
+        }
+      case .paused:
+        SleepPreventer.updateSleepPrevention()
+        if player == PlayerCore.lastActive {
+          NowPlayingInfoManager.shared.updateInfo()
+          if player.mainWindow.pipStatus == .inPIP {
+            player.mainWindow.pip.playing = false
+          }
+        }
+      default: return
       }
     }
   }
-  var currentFolder: URL?
+
+  var isSeeking: Bool = false
+
+  var currentURL: URL? {
+    didSet {
+      guard currentURL == nil else { return }
+      mpvMd5 = nil
+    }
+  }
   var isNetworkResource: Bool = false
   var mpvMd5: String?
 
@@ -47,39 +109,36 @@ class PlaybackInfo {
   var videoPosition: VideoTime?
   var videoDuration: VideoTime?
 
+  var progress: Double {
+    guard let progress = videoPosition / videoDuration else { return 0 }
+    return progress
+  }
+
+  /// Remaining playback time.
+  ///
+  /// This will or will not reflect the speed at which playback is occurring depending upon whether the `scaleRemainingTime`
+  /// setting is enabled or not.
+  var videoRemaining: VideoTime?
+
   var cachedWindowScale: Double = 1.0
 
   func constrainVideoPosition() {
-    guard let duration = videoDuration else { return }
-    if videoPosition!.second < 0 { videoPosition!.second = 0 }
-    if videoPosition!.second > duration.second { videoPosition!.second = duration.second }
+    guard let duration = videoDuration, let position = videoPosition else { return }
+    if position.second < 0 { position.second = 0 }
+    if position.second > duration.second { position.second = duration.second }
   }
 
-  var isSeeking: Bool = false
-
-  var isPaused: Bool = false {
-    didSet {
-      PlayerCore.checkStatusForSleep()
-      if player == PlayerCore.lastActive {
-        if #available(macOS 10.13, *), RemoteCommandController.useSystemMediaControl {
-          NowPlayingInfoManager.updateInfo(state: isPaused ? .paused : .playing)
-        }
-        if #available(macOS 10.12, *), player.mainWindow.pipStatus == .inPIP {
-          player.mainWindow.pip.playing = isPlaying
-        }
-      }
+  var isAudio: MediaIsAudioStatus {
+    guard !isNetworkResource else { return .notAudio }
+    let noVideoTrack = videoTracks.isEmpty
+    let noAudioTrack = audioTracks.isEmpty
+    if noVideoTrack && noAudioTrack {
+      return .unknown
     }
-  }
-  var isPlaying: Bool {
-    get {
-      return !isPaused
-    }
-    set {
-      isPaused = !newValue
-    }
+    let hasRealVideoTrack = videoTracks.contains { !$0.isAlbumart }
+    return (noVideoTrack || !hasRealVideoTrack) ? .isAudio : .notAudio
   }
 
-  var justLaunched: Bool = true
   var justStartedFile: Bool = false
   var justOpenedFile: Bool = false
   var shouldAutoLoadFiles: Bool = false
@@ -88,11 +147,11 @@ class PlaybackInfo {
 
   /** The current applied aspect, used for find current aspect in menu, etc. Maybe not a good approach. */
   var unsureAspect: String = "Default"
-  var unsureCrop: String = "None"
+  var unsureCrop: String = "None" // TODO: rename this to "selectedCrop"
   var cropFilter: MPVFilter?
   var flipFilter: MPVFilter?
   var mirrorFilter: MPVFilter?
-  var audioEqFilters: [MPVFilter?]?
+  var audioEqFilter: MPVFilter?
   var delogoFilter: MPVFilter?
 
   var deinterlace: Bool = false
@@ -128,19 +187,20 @@ class PlaybackInfo {
 
   var audioTracks: [MPVTrack] = []
   var videoTracks: [MPVTrack] = []
-  var subTracks: [MPVTrack] = []
+  @Atomic var subTracks: [MPVTrack] = []
 
-  var abLoopStatus: Int = 0 // 0: none, 1: A set, 2: B set (looping)
+  var abLoopStatus: LoopStatus = .cleared
 
   /** Selected track IDs. Use these (instead of `isSelected` of a track) to check if selected */
-  var aid: Int?
-  var sid: Int?
-  var vid: Int?
-  var secondSid: Int?
+  @Atomic var aid: Int?
+  @Atomic var sid: Int?
+  @Atomic var vid: Int?
+  @Atomic var secondSid: Int?
+
+  var isSubVisible = true
+  var isSecondSubVisible = true
 
   var subEncoding: String?
-
-  var haveDownloadedSub: Bool = false
 
   func trackList(_ type: MPVTrack.TrackType) -> [MPVTrack] {
     switch type {
@@ -175,33 +235,40 @@ class PlaybackInfo {
       id = secondSid
       list = subTracks
     }
-    if let id = id {
+    if let id {
       return list.first { $0.id == id }
     } else {
       return nil
     }
   }
 
-  var playlist: [MPVPlaylistItem] = []
-  var chapters: [MPVChapter] = []
-  var chapter = 0
+  /// Copy of the mpv playlist.
+  /// - Important: Obtaining video duration, playback progress, and metadata for files in the playlist can be a slow operation, so a
+  ///     background task is used and the results are cached. Thus the playlist must be protected with a lock as well as the cache.
+  ///     To avoid the need to lock multiple locks the cache properties are always accessed while holding the playlist lock. The cache
+  ///     properties are private to force all access to be through class methods that properly coordinate thread access.
+  @Atomic var playlist: [MPVPlaylistItem] = []
 
-  var matchedSubs: [String: [URL]] = [:]
-  var currentSubsInfo: [FileInfo] = []
-  var currentVideosInfo: [FileInfo] = []
-
-  // The cache is read by the main thread and updated by a background thread therefore all use
-  // must be through the class methods that properly coordinate thread access.
+  var isShuffled = false
   private var cachedVideoDurationAndProgress: [String: (duration: Double?, progress: Double?)] = [:]
   private var cachedMetadata: [String: (title: String?, album: String?, artist: String?)] = [:]
 
-  // Queue dedicated to providing serialized access to class data shared between threads.
-  // Data is accessed by the main thread, therefore the QOS for the queue must not be too low
-  // to avoid blocking the main thread for an extended period of time.
-  private let lockQueue = DispatchQueue(label: "IINAPlaybackInfoLock", qos: .userInitiated)
+  var chapters: [MPVChapter] = []
+  var chapter = 0
+
+  func getChapter(forVideoTime time: VideoTime) -> MPVChapter? {
+    return chapters.last(where: { $0.time <= time })
+  }
+
+  @Atomic var matchedSubs: [String: [URL]] = [:]
+
+  func getMatchedSubs(_ file: String) -> [URL]? { $matchedSubs.withLock { $0[file] } }
+
+  var currentSubsInfo: [FileInfo] = []
+  var currentVideosInfo: [FileInfo] = []
 
   func calculateTotalDuration() -> Double? {
-    lockQueue.sync {
+    $playlist.withLock { playlist in
       var totalDuration: Double? = 0
       for p in playlist {
         if let duration = cachedVideoDurationAndProgress[p.filename]?.duration {
@@ -216,7 +283,7 @@ class PlaybackInfo {
   }
 
   func calculateTotalDuration(_ indexes: IndexSet) -> Double {
-    lockQueue.sync {
+    $playlist.withLock { playlist in
       indexes
         .compactMap { cachedVideoDurationAndProgress[playlist[$0].filename]?.duration }
         .compactMap { $0 > 0 ? $0 : 0 }
@@ -224,49 +291,74 @@ class PlaybackInfo {
     }
   }
 
+  /// Return the cached duration and progress for the given file if present in the cache.
+  /// - Parameter file: File to return the duration and progress for.
+  /// - Returns: A tuple containing the duration and progress if found in the cache, otherwise `nil`.
+  /// - Important: To avoid the need to lock multiple locks the cache properties are always accessed while holding the playlist lock.
   func getCachedVideoDurationAndProgress(_ file: String) -> (duration: Double?, progress: Double?)? {
-    lockQueue.sync {
+    $playlist.withLock { _ in
       cachedVideoDurationAndProgress[file]
     }
   }
 
+  /// Store the given duration for the given file in the cache.
+  /// - Parameters:
+  ///   - file: File to store the duration for.
+  ///   - duration: The duration of the file.
+  /// - Important: To avoid the need to lock multiple locks the cache properties are always accessed while holding the playlist lock.
   func setCachedVideoDuration(_ file: String, _ duration: Double) {
-    lockQueue.sync {
+    $playlist.withLock { _ in
       cachedVideoDurationAndProgress[file]?.duration = duration
     }
   }
 
+  /// Store the given duration and progress for the given file in the cache.
+  /// - Parameters:
+  ///   - file: File to store the duration and progress for.
+  ///   - value: A tuple containing the duration and progress for the file.
+  /// - Important: To avoid the need to lock multiple locks the cache properties are always accessed while holding the playlist lock.
   func setCachedVideoDurationAndProgress(_ file: String, _ value: (duration: Double?, progress: Double?)) {
-    lockQueue.sync {
+    $playlist.withLock { _ in
       cachedVideoDurationAndProgress[file] = value
     }
   }
 
+  /// Return the cached metadata for the given file if present in the cache.
+  /// - Parameter file: File to return the metadata for.
+  /// - Returns: A tuple containing the title, album and artist if found in the cache, otherwise `nil`.
+  /// - Important: To avoid the need to lock multiple locks the cache properties are always accessed while holding the playlist lock.
   func getCachedMetadata(_ file: String) -> (title: String?, album: String?, artist: String?)? {
-    lockQueue.sync {
+    $playlist.withLock { _ in
       cachedMetadata[file]
     }
   }
 
+  /// Store the given metadata for the given file in the cache.
+  /// - Parameters:
+  ///   - file: File to store the title, album and artist for.
+  ///   - value: A tuple containing the duration and progress for the file.
+  /// - Important: To avoid the need to lock multiple locks the cache properties are always accessed while holding the playlist lock.
   func setCachedMetadata(_ file: String, _ value: (title: String?, album: String?, artist: String?)) {
-    lockQueue.sync {
+    $playlist.withLock { _ in
       cachedMetadata[file] = value
     }
   }
 
-  var thumbnailsReady = false
-  var thumbnailsProgress: Double = 0
-  var thumbnails: [FFThumbnail] = []
+  @Atomic var thumbnailsReady = false
+  @Atomic var thumbnailsProgress: Double = 0
+  @Atomic var thumbnails: [FFThumbnail] = []
 
   func getThumbnail(forSecond sec: Double) -> FFThumbnail? {
-    guard !thumbnails.isEmpty else { return nil }
-    var tb = thumbnails.last!
-    for i in 0..<thumbnails.count {
-      if thumbnails[i].realTime >= sec {
-        tb = thumbnails[(i == 0 ? i : i - 1)]
-        break
+    $thumbnails.withLock {
+      guard !$0.isEmpty else { return nil }
+      var tb = $0.last!
+      for i in 0..<$0.count {
+        if $0[i].realTime >= sec {
+          tb = $0[(i == 0 ? i : i - 1)]
+          break
+        }
       }
+      return tb
     }
-    return tb
   }
 }

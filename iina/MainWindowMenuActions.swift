@@ -11,23 +11,23 @@ import Cocoa
 extension MainWindowController {
 
   @objc func menuShowPlaylistPanel(_ sender: NSMenuItem) {
-    showPlaylistSidebar(tab: .playlist)
+    sidebars.show(tab: "playlist")
   }
 
   @objc func menuShowChaptersPanel(_ sender: NSMenuItem) {
-    showPlaylistSidebar(tab: .chapters)
+    sidebars.show(tab: "chapters")
   }
 
   @objc func menuShowVideoQuickSettings(_ sender: NSMenuItem) {
-    showSettingsSidebar(tab: .video)
+    sidebars.show(tab: "video")
   }
 
   @objc func menuShowAudioQuickSettings(_ sender: NSMenuItem) {
-    showSettingsSidebar(tab: .audio)
+    sidebars.show(tab: "audio")
   }
 
   @objc func menuShowSubQuickSettings(_ sender: NSMenuItem) {
-    showSettingsSidebar(tab: .sub)
+    sidebars.show(tab: "sub")
   }
 
   @objc func menuChangeWindowSize(_ sender: NSMenuItem) {
@@ -39,7 +39,7 @@ extension MainWindowController {
     //  10: smaller size
     //  11: bigger size
     let size = sender.tag
-    guard let window = window, !fsState.isFullscreen else { return }
+    guard let window, !fsState.isFullscreen else { return }
 
     let screenFrame = (window.screen ?? NSScreen.main!).visibleFrame
     let newFrame: NSRect
@@ -59,7 +59,7 @@ extension MainWindowController {
     case 10, 11:
       let newWidth = window.frame.width + scaleStep * (size == 10 ? -1 : 1)
       let newHeight = newWidth / (window.aspectRatio.width / window.aspectRatio.height)
-      newFrame = window.frame.centeredResize(to: NSSize(width: newWidth, height: newHeight).satisfyMinSizeWithSameAspectRatio(minSize))
+      newFrame = window.frame.centeredResize(to: NSSize(width: newWidth, height: newHeight).satisfyMinSizeWithSameAspectRatio(AppData.mainWindowMinSize))
     default:
       return
     }
@@ -71,7 +71,11 @@ extension MainWindowController {
     setWindowFloatingOnTop(!isOntop)
   }
 
-  @available(macOS 10.12, *)
+  @objc func menuLockAspectRatio(_ sender: NSMenuItem) {
+    let unlock = Preference.bool(for: .unlockWindowAspectRatio)
+    Preference.set(!unlock, for: .unlockWindowAspectRatio)
+  }
+
   @objc func menuTogglePIP(_ sender: NSMenuItem) {
     switch pipStatus {
     case .notInPIP:
@@ -98,54 +102,9 @@ extension MainWindowController {
         player.info.delogoFilter = nil
       }
     } else {
-      self.hideSideBar {
-        self.enterInteractiveMode(.freeSelecting)
+      self.sidebars.hideAllSideBars {
+        self.interactiveMode.enter(mode: .delogo)
       }
-    }
-  }
-
-  @objc
-  func menuToggleVideoFilterString(_ sender: NSMenuItem) {
-    if let string = (sender.representedObject as? String) {
-      menuToggleFilterString(string, forType: MPVProperty.vf)
-    }
-  }
-
-  @objc
-  func menuToggleAudioFilterString(_ sender: NSMenuItem) {
-    if let string = (sender.representedObject as? String) {
-      menuToggleFilterString(string, forType: MPVProperty.af)
-    }
-  }
-
-  private func menuToggleFilterString(_ string: String, forType type: String) {
-    let isVideo = type == MPVProperty.vf
-    if let filter = MPVFilter(rawString: string) {
-      // Removing a filter based on its position within the filter list is the preferred way to do
-      // it as per discussion with the mpv project. Search the list of filters and find the index
-      // of the specified filter (if present).
-      if let index = player.mpv.getFilters(type).firstIndex(of: filter) {
-        // remove
-        if isVideo {
-          _ = player.removeVideoFilter(filter, index)
-        } else {
-          _ = player.removeAudioFilter(filter, index)
-        }
-      } else {
-        // add
-        if isVideo {
-          if !player.addVideoFilter(filter) {
-            Utility.showAlert("filter.incorrect")
-          }
-        } else {
-          if !player.addAudioFilter(filter) {
-            Utility.showAlert("filter.incorrect")
-          }
-        }
-      }
-    }
-    if let vfWindow = (NSApp.delegate as? AppDelegate)?.vfWindow, vfWindow.loaded {
-      vfWindow.reloadTable()
     }
   }
 }

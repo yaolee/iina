@@ -20,17 +20,37 @@ fileprivate protocol ProviderProtocol {
 
 protocol OnlineSubtitleFetcher {
   associatedtype Subtitle: OnlineSubtitle
+  var loggedIn: Bool { get }
   func fetch(from url: URL, withProviderID id: String, playerCore player: PlayerCore) -> Promise<[Subtitle]>
+  func logout(timeout: TimeInterval?) -> Promise<Void>
 }
 
 class OnlineSubtitle: NSObject {
   enum CommonError: Error {
     case noResult
     case canceled
+    case dismissed
     case cannotConnect(Error)
     case networkError(Error?)
     case timedOut(Error)
     case fsError
+  }
+
+  static var loggedIn: Bool {
+    let id = Preference.string(for: .onlineSubProvider) ?? Providers.openSub.id
+    switch id {
+    case Providers.openSub.id:
+      return Providers.openSub.getFetcher().loggedIn
+    case Providers.shooter.id:
+      return Providers.shooter.getFetcher().loggedIn
+    case Providers.assrt.id:
+      return Providers.assrt.getFetcher().loggedIn
+    default:
+      guard let provider = Providers.fromPlugin[id] else {
+        return Providers.openSub.getFetcher().loggedIn
+      }
+      return provider.getFetcher().loggedIn
+    }
   }
 
   /** Prepend a number before file name to avoid overwriting. */
@@ -60,12 +80,14 @@ class OnlineSubtitle: NSObject {
   func getDescription() -> (name: String, left: String, right: String) { return("", "", "") }
 
   class DefaultFetcher {
+    var loggedIn: Bool { false }
+    func logout(timeout: TimeInterval?) -> Promise<Void> { .value }
     required init() {}
   }
 
   class Providers {
     static let shooter = Provider<Shooter.Fetcher>(id: ":shooter", name: "shooter.cn")
-    static let openSub = Provider<OpenSub.Fetcher>(id: ":opensubtitles", name: "opensubtitles.org")
+    static let openSub = Provider<OpenSub.Fetcher>(id: ":opensubtitles", name: "opensubtitles.com")
     static let assrt = Provider<Assrt.Fetcher>(id: ":assrt", name: "assrt.net")
 
     static var fromPlugin: [String: Provider<JSPluginSub.Fetcher>] = [:]
@@ -123,15 +145,54 @@ class OnlineSubtitle: NSObject {
 
     func fetchSubtitles(url: URL, player: PlayerCore) -> Promise<[URL]> {
       return getFetcher().fetch(from: url, withProviderID: providerID, playerCore: player)
-      .get { subtitles in
+      .get { [self] subtitles in
         if subtitles.isEmpty {
           throw OnlineSubtitle.CommonError.noResult
         } else {
-          player.sendOSD(.foundSub(subtitles.count))
+          player.sendOSD(.downloadingSub(subtitles.count, name))
         }
       }.thenFlatMap { subtitle in
         subtitle.download()
       }
+    }
+  }
+
+  static func logout(timeout: TimeInterval? = nil) {
+    let id = Preference.string(for: .onlineSubProvider) ?? Providers.openSub.id
+    switch id {
+    case Providers.openSub.id:
+      _logout(using: Providers.openSub, timeout: timeout)
+    case Providers.shooter.id:
+      _logout(using: Providers.shooter, timeout: timeout)
+    case Providers.assrt.id:
+      _logout(using: Providers.assrt, timeout: timeout)
+    default:
+      guard let provider = Providers.fromPlugin[id] else {
+        _logout(using: Providers.openSub, timeout: timeout)
+        return
+      }
+      _logout(using: provider, timeout: timeout)
+    }
+  }
+
+  fileprivate static func _logout<P: ProviderProtocol>(using provider: P, timeout: TimeInterval? = nil) {
+    provider.getFetcher().logout(timeout: timeout).catch { err in
+      let prefix = "Failed to log out of \(provider.name). "
+      switch err {
+      case CommonError.cannotConnect(let cause):
+        log("\(prefix)\(cause.localizedDescription)", level: .error)
+      case CommonError.networkError(let cause):
+        let error = cause ?? err
+        log("\(prefix)\(error.localizedDescription)", level: .error)
+      case CommonError.timedOut(let cause):
+        log("\(prefix)\(cause.localizedDescription)", level: .error)
+      case JSPluginSub.Error.pluginError(let message):
+        log("\(prefix)\(message)", level: .error)
+      default:
+        log("\(prefix)\(err.localizedDescription)", level: .error)
+      }
+    }.finally {
+      NotificationCenter.default.post(Notification(name: .iinaLogoutCompleted, object: self))
     }
   }
 
@@ -174,15 +235,15 @@ class OnlineSubtitle: NSObject {
         osdMessage = .cannotConnect
         log("\(prefix)\(cause.localizedDescription)", level: .error)
       case CommonError.networkError(let cause):
-        osdMessage = .networkError
         let error = cause ?? err
+        osdMessage = osdMessageForDetailedError(error, fallback: .networkError, providerName: provider.name)
         log("\(prefix)\(error.localizedDescription)", level: .error)
-      case OpenSub.Error.xmlRpcError(let rpcError):
-        osdMessage = .networkError
-        log("\(prefix)\(rpcError.readableDescription)", level: .error)
       case CommonError.timedOut(let cause):
         osdMessage = .timedOut
         log("\(prefix)\(cause.localizedDescription)", level: .error)
+      case OpenSubClient.Error.errorResponse(let response):
+        osdMessage = osdMessageForOpenSubErrorResponse(response, fallback: .networkError, providerName: provider.name)
+        log("\(prefix)\(response.message)", level: .error)
       case Shooter.Error.cannotReadFile(let cause),
            OpenSub.Error.cannotReadFile(let cause):
         osdMessage = .fileError
@@ -192,6 +253,9 @@ class OnlineSubtitle: NSObject {
         osdMessage = .fileError
         log("\(prefix)File is too small. Minimum file size supported by the site is \(minimumFileSize)",
             level: .error)
+      case OpenSub.Error.emptyFile(let reason):
+        osdMessage = .fileError
+        log("\(prefix)Invalid file, \(reason)", level: .error)
       case OpenSub.Error.loginFailed(let reason):
         osdMessage = .cannotLogin
         log("\(prefix)Login failed, \(reason)", level: .error)
@@ -202,12 +266,48 @@ class OnlineSubtitle: NSObject {
         osdMessage = .canceled
         // Not an error.
         log("User canceled download of subtitles")
+      case CommonError.dismissed:
+        // Operation dismissed by, for example, a plugin with custom implementation.
+        log("Default subtitle search wokflow dismissed")
+        player.isSearchingOnlineSubtitle = false
+        return
       default:
         osdMessage = .networkError
         log("\(prefix)\(err.localizedDescription)", level: .error)
       }
-      player.sendOSD(osdMessage)
+      let timeout: Float? = shouldExtendTimeout(for: osdMessage) ? 5 : nil
+      player.sendOSD(osdMessage, forcedTimeout: timeout)
       player.isSearchingOnlineSubtitle = false
+    }
+  }
+
+  private static func osdMessageForOpenSubErrorResponse(_ response: OpenSubClient.ErrorResponse,
+                                                        fallback: OSDMessage,
+                                                        providerName: String) -> OSDMessage {
+    guard providerName == Providers.openSub.name, response.remaining == -1 else { return fallback }
+    let resetTime = response.resetTimeUtc.map {
+      DateFormatter.localizedString(from: $0, dateStyle: .none, timeStyle: .short)
+    }
+    return .onlineSubQuotaExceeded(resetTime)
+  }
+
+  private static func osdMessageForDetailedError(_ error: Swift.Error,
+                                                 fallback: OSDMessage,
+                                                 providerName: String) -> OSDMessage {
+    switch error {
+    case OpenSubClient.Error.errorResponse(let response):
+      return osdMessageForOpenSubErrorResponse(response, fallback: fallback, providerName: providerName)
+    default:
+      return fallback
+    }
+  }
+
+  private static func shouldExtendTimeout(for osdMessage: OSDMessage) -> Bool {
+    switch osdMessage {
+    case .onlineSubQuotaExceeded:
+      return true
+    default:
+      return false
     }
   }
 
@@ -230,13 +330,13 @@ class OnlineSubtitle: NSObject {
     }
   }
 
-  private static func log(_ message: String, level: Logger.Level = .debug) {
+  private static func log(_ message: @autoclosure () -> String, level: Logger.Level = .debug) {
     Logger.log(message, level: level, subsystem: Logger.Sub.onlinesub)
   }
 }
 
 extension Logger {
   struct Sub {
-    static let onlinesub = Logger.Subsystem(rawValue: "onlinesub")
+    static let onlinesub = Logger.makeSubsystem("onlinesub")
   }
 }

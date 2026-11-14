@@ -14,6 +14,7 @@ class JavascriptPluginInstance {
   private var polyfill: JavascriptPolyfill!
 
   lazy var js: JSContext = createJSContext()
+  var logHandler: ((String, Logger.Level) -> Void)?
 
   weak var player: PlayerCore!
   weak var plugin: JavascriptPlugin!
@@ -39,12 +40,14 @@ class JavascriptPluginInstance {
   }()
 
   var menuItems: [JavascriptPluginMenuItem] = []
+  
+  let input = PluginInputManager()
 
   lazy var queue: DispatchQueue = {
     DispatchQueue(label: "com.colliderli.iina.plugin.\(plugin.identifier)", qos: .background)
   }()
 
-  lazy var subsystem: Logger.Subsystem = .init(rawValue: "JS:\(plugin.name)")
+  lazy var subsystem = Logger.makeSubsystem("\(isGlobal ? "global" : "player\(player.label!)") - \(plugin.name)", ["puzzlepiece.extension"])
 
   var currentFile: URL? {
     currentFileStack.last
@@ -54,7 +57,7 @@ class JavascriptPluginInstance {
   init(player: PlayerCore?, plugin: JavascriptPlugin) {
     self.plugin = plugin
 
-    if let player = player {
+    if let player {
       // normal plugin instance
       self.player = player
       isGlobal = false
@@ -67,7 +70,10 @@ class JavascriptPluginInstance {
   }
 
   deinit {
-    Logger.log("Unload \(self.plugin.name)", level: .debug, subsystem: subsystem)
+    if let plugin = self.plugin {
+      Logger.log("Unload \(plugin.name)", level: .debug, subsystem: subsystem)
+    }
+    polyfill.removeAllTimers()
     apis.values.forEach { $0.cleanUp(self) }
   }
 
@@ -162,15 +168,17 @@ class JavascriptPluginInstance {
       apis["sidebar"] = JavascriptAPISidebarView(context: ctx, pluginInstance: self)
       apis["playlist"] = JavascriptAPIPlaylist(context: ctx, pluginInstance: self)
       apis["subtitle"] = JavascriptAPISubtitle(context: ctx, pluginInstance: self)
+      apis["input"] = JavascriptAPIInput(context: ctx, pluginInstance: self)
     }
+    apis["ws"] = JavascriptAPIWebSocketController(context: ctx, pluginInstance: self)
 
     if player == nil {
       // it's a global instance
       apis["global"] = JavascriptAPIGlobalController(context: ctx, pluginInstance: self)
-    } else if let globalAPI = plugin.globalInstance?.apis["global"] as? JavascriptAPIGlobalController {
-      // it's a normal instance
+    } else if plugin.globalEntryPath != nil {
+      // it's a normal instance.
       let childAPI = JavascriptAPIGlobalChild(context: ctx, pluginInstance: self)
-      childAPI.parentAPI = globalAPI
+      childAPI.parentAPI = plugin.globalInstance?.apis["global"] as? JavascriptAPIGlobalController
       apis["global"] = childAPI
     }
 

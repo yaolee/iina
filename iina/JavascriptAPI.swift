@@ -28,6 +28,7 @@ class JavascriptAPI: NSObject {
   func log(_ message: String, level: Logger.Level = .debug) {
     guard pluginInstance != nil else { return }
     Logger.log(message, level: level, subsystem: pluginInstance.subsystem)
+    pluginInstance.logHandler?(message, level)
   }
 
   func whenPermitted<T>(to permission: JavascriptPlugin.Permission, block: () -> T?) -> T? {
@@ -40,6 +41,37 @@ class JavascriptAPI: NSObject {
 
   func permitted(to permission: JavascriptPlugin.Permission) -> Bool {
     return pluginInstance.plugin.permissions.contains(permission)
+  }
+
+  /// Checks whether the plugin is permitted to open the URL and returns the normalized URL string.
+  func shouldOpenURL(_ urlString: String) -> String? {
+    log("Attempting to open URL: \(urlString)")
+    let url = URL(string: urlString)
+    let scheme = url?.scheme?.lowercased()
+
+    switch scheme {
+    case "data", "memory":
+      // security-wise, these are equivalent to reading/writing in the sandboxed directories
+      return urlString
+
+    case "http", "https", "smb":
+      // for simple network requests, require network permission
+      return whenPermitted(to: .networkRequest) {
+        guard pluginInstance.canAccess(url: url!) else {
+          throwError(withMessage: "URL \(urlString) is not allowed.")
+          return nil
+        }
+        return urlString
+      }
+
+    case nil, "file":
+      // no protocol -> treat as file path
+      return parsePath(urlString, forceLocalPath: false).path
+
+    default:
+      // for any other protocols, require file system permission
+      return whenPermitted(to: .accessFileSystem) { urlString }
+    }
   }
 
   func extraSetup() { }
@@ -65,7 +97,7 @@ class JavascriptAPI: NSObject {
       path.hasPrefix("@video/") ? .video :
       path.hasPrefix("@audio/") ? .audio :
       path.hasPrefix("@sub") ? .sub : nil
-    if player != nil, let trackType = trackType {
+    if player != nil, let trackType {
       if let path = trackPath(path, type: trackType) {
         return (path, false)
       } else {
@@ -75,7 +107,7 @@ class JavascriptAPI: NSObject {
 
     return whenPermitted(to: .accessFileSystem) {
       var absPath = path
-      if let player = player, path.hasPrefix("@current/") {
+      if let player, path.hasPrefix("@current/") {
         guard let currentURL = player.info.currentURL else {
           log("@current is unavailable when no file playing", level: .error)
           return (nil, false)
@@ -89,12 +121,16 @@ class JavascriptAPI: NSObject {
         throwError(withMessage: "The path should be an absolute path: \(path)")
         return (nil, false)
       }
-      return (absPath, false)
-    }!
+      return (
+        absPath,
+        absPath.hasPrefix(pluginInstance.plugin.dataURL.path) ||
+        absPath.hasPrefix(pluginInstance.plugin.tmpURL.path)
+      )
+    } ?? (nil, false)
   }
 
   private func trackPath(_ path: String, type: MPVTrack.TrackType) -> String? {
-    guard let player = player else { return nil }
+    guard let player else { return nil }
 
     guard let strId = path.split(separator: "/", maxSplits: 2).last, let id = Int(strId) else {
       throwError(withMessage: "The path \(path) is invalid")
@@ -120,4 +156,26 @@ class JavascriptAPI: NSObject {
     }
     return expanded.path
   }
+}
+
+
+func createUInt8Array(fromData data: Data) -> JSValue? {
+  let context = JSContext.current()!
+  let length = data.count
+
+  let rawPtr = UnsafeMutableBufferPointer<UInt8>.allocate(capacity: length)
+  _ = data.withUnsafeBytes { (dataPtr: UnsafeRawBufferPointer) in
+    rawPtr.initialize(from: dataPtr)
+  }
+  let deallocator: JSTypedArrayBytesDeallocator = { ptr, _ in
+    ptr?.deallocate()
+  }
+  let arrayBufferRef = JSObjectMakeTypedArrayWithBytesNoCopy(context.jsGlobalContextRef,
+                                                             kJSTypedArrayTypeUint8Array,
+                                                             rawPtr.baseAddress,
+                                                             length,
+                                                             deallocator,
+                                                             nil,
+                                                             nil)
+  return JSValue(jsValueRef: arrayBufferRef, in: context)
 }

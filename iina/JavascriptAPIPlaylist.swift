@@ -25,7 +25,7 @@ class JavascriptAPIPlaylist: JavascriptAPI, JavascriptAPIPlaylistExportable {
   var menuItemBuilder: JSManagedValue?
 
   private func isPlaying() -> Bool {
-    if player!.info.isIdle {
+    if player!.info.state == .idle {
       log("Playlist API is only available when playing files.", level: .error)
       return false
     }
@@ -35,35 +35,39 @@ class JavascriptAPIPlaylist: JavascriptAPI, JavascriptAPIPlaylistExportable {
   func list() -> [[String: Any]] {
     guard isPlaying() else { return [] }
 
-    return player!.info.playlist.map {
-      [
-        "filename": $0.filename,
-        "title": $0.title ?? NSNull(),
-        "isPlaying": $0.isPlaying,
-        "isCurrent": $0.isCurrent
-      ]
+    return player!.info.$playlist.withLock { playlist in
+      playlist.map {
+        [
+          "filename": $0.filename,
+          "title": $0.title ?? NSNull(),
+          "isPlaying": $0.isPlaying,
+          "isCurrent": $0.isCurrent
+        ]
+      }
     }
   }
 
   func count() -> Int {
-    return player!.info.playlist.count
+    return player!.info.$playlist.withLock { $0.count }
   }
 
   func add(_ url: JSValue, _ at: Int = -1) -> Any {
     guard isPlaying() else { return false }
 
-    let count = player!.info.playlist.count
+    let count = player!.info.$playlist.withLock { $0.count }
     guard at < count else {
       log("playlist.add: Invalid index.", level: .error)
       return false
     }
     if url.isArray {
       if let paths = url.toArray() as? [String] {
-        player!.addToPlaylist(paths: paths, at: at)
-        return true
+        let allowedPaths = paths.compactMap(shouldOpenURL)
+        player!.addToPlaylist(paths: allowedPaths, at: at)
+        return allowedPaths.count == paths.count
       }
     } else if url.isString {
-      player!.addToPlaylist(paths: [url.toString()], at: at)
+      guard let url = shouldOpenURL(url.toString()) else { return false }
+      player!.addToPlaylist(paths: [url], at: at)
       return true
     }
     log("playlist.add: The first argument should be a string or an array of strings.", level: .error)
@@ -96,7 +100,7 @@ class JavascriptAPIPlaylist: JavascriptAPI, JavascriptAPIPlaylistExportable {
 
   func move(_ index: Int, _ to: Int) -> Any {
     guard isPlaying() else { return false }
-    let count = player!.info.playlist.count
+    let count = player!.info.$playlist.withLock { $0.count }
 
     guard index >= 0 && index < count && to >= 0 && to < count && index != to else {
       log("playlist.move: Invalid index.", level: .error)
@@ -108,7 +112,7 @@ class JavascriptAPIPlaylist: JavascriptAPI, JavascriptAPIPlaylistExportable {
 
   func play(_ index: Int) {
     guard isPlaying() else { return }
-    let count = player!.info.playlist.count
+    let count = player!.info.$playlist.withLock { $0.count }
 
     guard index >= 0 && index < count else {
       log("playlist.play: Invalid index.", level: .error)

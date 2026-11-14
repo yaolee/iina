@@ -27,19 +27,39 @@ class JavascriptAPIGlobalController: JavascriptAPI, JavascriptAPIGlobalControlle
   lazy var messageHub = JavascriptMessageHub(reference: self)
   private var instanceCounter = 0
 
+  static var playerCores = Set<PlayerCore>()
+
+  static var nonIdle: [PlayerCore] {
+    playerCores.compactMap { $0.info.state == .idle ? nil : $0 }
+  }
+
   override func cleanUp(_ instance: JavascriptPluginInstance) {
+    messageHub.clearListeners()
     instances.values.forEach {
       $0.mainWindow.close()
       $0.shutdown()
+      Self.playerCores.remove($0)
     }
     instances.removeAll()
     childAPIs.removeAll()
   }
 
   func createPlayerInstance(_ options: [String: Any]) -> Any {
+    let url: String?
+    if let urlString = options["url"] as? String {
+      guard let allowedURL = shouldOpenURL(urlString) else {
+        log("Player not created, URL needs permission: \(urlString)", level: .error)
+        return false
+      }
+      url = allowedURL
+    } else {
+      url = nil
+    }
+
     instanceCounter += 1
     // create the `PlayerCore` manually since it's managed directly by the plugin
     let pc = PlayerCore()
+    Self.playerCores.insert(pc)
     pc.label = "\(instanceCounter)-\(pluginInstance.plugin.identifier)"
     pc.isManagedByPlugin = true
     pc.startMPV()
@@ -60,7 +80,7 @@ class JavascriptAPIGlobalController: JavascriptAPI, JavascriptAPIGlobalControlle
       pc.reloadPlugin(pluginInstance.plugin)
     }
 
-    // accociate child plugin
+    // associate child plugin
     let childPluginInstance = pc.plugins.first { $0.plugin == pluginInstance.plugin }!
     let childAPI = childPluginInstance.apis["global"] as! JavascriptAPIGlobalChild
     childAPI.parentAPI = self
@@ -68,7 +88,7 @@ class JavascriptAPIGlobalController: JavascriptAPI, JavascriptAPIGlobalControlle
     childAPIs[instanceCounter] = childAPI
 
     // open file
-    if let url = options["url"] as? String, let url = parsePath(url, forceLocalPath: false).path  {
+    if let url {
       pc.openURLString(url)
     }
 
@@ -108,7 +128,7 @@ class JavascriptAPIGlobalChild: JavascriptAPI, JavascriptAPIGlobalChildExportabl
   }
 
   func postMessage(_ name: String, _ data: JSValue) {
-    parentAPI.messageHub.callListener(forEvent: name, withDataObject: data.toObject(), userInfo: player?.label)
+    parentAPI?.messageHub.callListener(forEvent: name, withDataObject: data.toObject(), userInfo: player?.label)
   }
 
   func onMessage(_ name: String, _ callback: JSValue) {

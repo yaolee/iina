@@ -21,33 +21,20 @@ class PrefPluginPermissionListView: NSStackView {
   func setPlugin(_ plugin: JavascriptPlugin, onlyShowAddedFrom previousPlugin: JavascriptPlugin? = nil) {
     views.forEach { removeView($0) }
 
-    let permissions: Set<JavascriptPlugin.Permission>
+    var permissions: Set<JavascriptPlugin.Permission>
     if let previous = previousPlugin {
       permissions = plugin.permissions.subtracting(previous.permissions)
+      if plugin.domainList != previous.domainList {
+        permissions.insert(.networkRequest)
+      }
     } else {
       permissions = plugin.permissions
     }
 
-    let sorted = permissions.sorted { (a, b) in
-      let da = a.isDangerous, db = b.isDangerous
-      if da == db { return a.rawValue < b.rawValue }
-      return da
-    }
+    let localized = plugin.localizedPermissions(permissions)
 
-    for permission in sorted {
-      func localize(_ key: String) -> String {
-        return NSLocalizedString("permissions.\(permission.rawValue).\(key)", comment: "")
-      }
-      var desc = localize("desc")
-      if case .networkRequest = permission {
-        if plugin.domainList.contains("*") {
-          desc += "\n- \(localize("any_site"))"
-        } else {
-          desc += "\n- "
-          desc += plugin.domainList.joined(separator: "\n- ")
-        }
-      }
-      let vc = PrefPluginPermissionView(name: localize("name"), desc: desc, isDangerous: permission.isDangerous)
+    for p in localized {
+      let vc = PrefPluginPermissionView(name: p.name, desc: p.desc, isDangerous: p.isDangerous)
       addView(vc.view, in: .top)
       Utility.quickConstraints(["H:|-0-[v]-0-|"], ["v": vc.view])
     }

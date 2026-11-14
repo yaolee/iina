@@ -57,9 +57,9 @@ class MPVFilter: NSObject {
    - parameter amount: Amount for la and ca. Should be in [-1.5, 1.5].
    */
   static func unsharp(amount: Float, msize: Int = 5) -> MPVFilter {
-    let amoutStr = amount.description
+    let amountStr = amount.description
     let msizeStr = msize.description
-    return MPVFilter(lavfiName: "unsharp", label: nil, params: [msizeStr, msizeStr, amoutStr, msizeStr, msizeStr, amoutStr])
+    return MPVFilter(lavfiName: "unsharp", label: nil, params: [msizeStr, msizeStr, amountStr, msizeStr, msizeStr, amountStr])
   }
 
   // MARK: - Members
@@ -75,7 +75,7 @@ class MPVFilter: NSObject {
     get {
       var str = ""
       // label
-      if let label = label { str += "@\(label):" }
+      if let label { str += "@\(label):" }
       // name
       str += name
       // params
@@ -113,7 +113,7 @@ class MPVFilter: NSObject {
     self.type = FilterType(rawValue: name)
     self.name = name
     self.label = label
-    if let params = params, let type = type, let format = MPVFilter.formats[type]?.components(separatedBy: ":") {
+    if let params, let type, let format = MPVFilter.formats[type]?.components(separatedBy: ":") {
       var translated: [String: String] = [:]
       for (key, value) in params {
         if let number = Int(key.dropFirst()) {
@@ -208,7 +208,7 @@ class MPVFilter: NSObject {
   /// - Parameter rawParamString: String to be parsed.
   /// - Returns: A `Dictionary` containing the filter parameters or `nil` if the parameters were not parsed.
   private static func parseRawParamString(_ name: String, _ rawParamString: String?) -> [String: String]? {
-    guard let rawParamString = rawParamString, !doNotParse.contains(name) else { return nil }
+    guard let rawParamString, !doNotParse.contains(name) else { return nil }
     let pairs = rawParamString.split(separator: ":")
     // If there is only one parameter then parameter order is not an issue.
     guard pairs.count > 1 else { return nil }
@@ -230,29 +230,6 @@ class MPVFilter: NSObject {
   }
 
   // MARK: - Param getter
-
-  func cropParams(videoSize: NSSize) -> [String: Double] {
-    guard type == .crop else {
-      Logger.fatal("Trying to get crop params from a non-crop filter!")
-    }
-    guard let params = params else { return [:] }
-    // w and h should always valid
-    let w = Double(params["w"]!)!
-    let h = Double(params["h"]!)!
-    let x: Double, y: Double
-    // check x and y
-    if let testx = Double(params["x"] ?? ""), let testy = Double(params["y"] ?? "") {
-      x = testx
-      y = testy
-    } else {
-      let cx = Double(videoSize.width) / 2
-      let cy = Double(videoSize.height) / 2
-      x = cx - w / 2
-      y = cy - h / 2
-    }
-
-    return ["x": x, "y": y, "w": w, "h": h]
-  }
 
   /// Returns `true` if this filter is equal to the given filter `false` otherwise.
   ///
